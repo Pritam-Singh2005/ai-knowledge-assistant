@@ -1,70 +1,120 @@
-# =============================================================================
-# Module: Cross-Encoder Reranker
-# Role: Reranks candidate document chunks based on semantic relevance.
-# =============================================================================
+# ============================================================
+# reranker.py
+# CrossEncoder Reranking
+# ============================================================
 
-from typing import List, Dict, Any, Tuple
 from sentence_transformers import CrossEncoder
 
-# Lazy global model loading
-_reranker_instance = None
+
+DEFAULT_RERANKER_MODEL = (
+    "cross-encoder/ms-marco-MiniLM-L-6-v2"
+)
 
 
-def get_reranker_model(model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2") -> CrossEncoder:
-    """Initializes and caches the CrossEncoder model instance."""
-    global _reranker_instance
-    if _reranker_instance is None:
-        print(f"Loading Reranker Model: {model_name}...")
-        _reranker_instance = CrossEncoder(model_name)
-    return _reranker_instance
+_reranker_models = {}
 
+
+# ============================================================
+# LOAD RERANKER
+# ============================================================
+
+def get_reranker(
+    model_name=DEFAULT_RERANKER_MODEL
+):
+
+    if model_name not in _reranker_models:
+
+        _reranker_models[model_name] = (
+            CrossEncoder(model_name)
+        )
+
+    return _reranker_models[model_name]
+
+
+# ============================================================
+# RERANK DOCUMENTS
+# ============================================================
 
 def rerank_documents(
-    query: str,
-    documents: List[str],
-    metadatas: List[Dict[str, Any]],
-    top_k: int = 3,
-    model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-) -> Tuple[List[str], List[Dict[str, Any]]]:
-    """
-    Reranks retrieved candidate chunks using a Cross-Encoder.
-    Returns top_k (reranked_documents, reranked_metadatas).
-    """
+    query,
+    documents,
+    metadatas,
+    top_k=3,
+    model_name=DEFAULT_RERANKER_MODEL
+):
+
     if not documents:
+
         return [], []
 
-    model = get_reranker_model(model_name)
+    # Keep metadata aligned
+    pairs = []
 
-    # Form query-document sentence pairs
-    pairs = [[query, doc] for doc in documents]
+    valid_documents = []
 
-    # Predict relevance scores
-    scores = model.predict(pairs)
+    valid_metadatas = []
 
-    # Pair scores with documents and metadata
-    scored_results = list(zip(scores, documents, metadatas))
+    for document, metadata in zip(
+        documents,
+        metadatas
+    ):
 
-    # Sort in descending order of relevance score
-    scored_results.sort(key=lambda x: x[0], reverse=True)
+        if not document:
+            continue
 
-    # Select top_k results
-    top_results = scored_results[:top_k]
+        valid_documents.append(
+            document
+        )
 
-    reranked_docs = [doc for _, doc, _ in top_results]
-    reranked_metas = [meta for _, _, meta in top_results]
+        valid_metadatas.append(
+            metadata or {}
+        )
 
-    return reranked_docs, reranked_metas
+        pairs.append(
+            [
+                query,
+                document
+            ]
+        )
 
+    if not pairs:
 
-if __name__ == "__main__":
-    # Test Run
-    sample_query = "What is deep learning?"
-    sample_docs = [
-        "Deep learning is a subset of machine learning using neural networks.",
-        "Photosynthesis is the process by which plants turn sunlight into energy.",
-        "Artificial intelligence covers machine learning and neural architectures."
+        return [], []
+
+    model = get_reranker(
+        model_name
+    )
+
+    scores = model.predict(
+        pairs
+    )
+
+    ranked = sorted(
+        zip(
+            scores,
+            valid_documents,
+            valid_metadatas
+        ),
+        key=lambda x: float(x[0]),
+        reverse=True
+    )
+
+    limit = min(
+        int(top_k),
+        len(ranked)
+    )
+
+    reranked_documents = [
+        item[1]
+        for item in ranked[:limit]
     ]
-    sample_metas = [{"source": "A.pdf"}, {"source": "B.pdf"}, {"source": "C.pdf"}]
 
-    ranked_docs, ranked_metas = rerank_documents(sample_query, sample_docs, sample_metas, top_k=2)
-    print("Reranked Top Result:", ranked_docs[0])
+    reranked_metadatas = [
+        item[2]
+        for item in ranked[:limit]
+    ]
+
+    return (
+        reranked_documents,
+        reranked_metadatas
+    )

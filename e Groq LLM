@@ -1,0 +1,1689 @@
+[1mdiff --git a/app.py b/app.py[m
+[1mindex 987cb79..1ebe2e9 100644[m
+[1m--- a/app.py[m
+[1m+++ b/app.py[m
+[36m@@ -1,41 +1,45 @@[m
+ # =============================================================================[m
+ # Module: AetherAI — Production General & RAG Assistant[m
+[31m-# Features: Dual Mode (General Chat + Document RAG), Async Streaming, [m
+[31m-#           Multithreaded Processing, Hybrid Retrieval & Faithfulness Checks[m
+[32m+[m[32m# Features:[m
+[32m+[m[32m#   - Dual Mode (General Chat + Document RAG)[m
+[32m+[m[32m#   - Groq Cloud LLM[m
+[32m+[m[32m#   - Streaming Responses[m
+[32m+[m[32m#   - Multithreaded PDF Processing[m
+[32m+[m[32m#   - Hybrid Retrieval[m
+[32m+[m[32m#   - CrossEncoder Reranking[m
+[32m+[m[32m#   - Conversation-Aware Query Rewriting[m
+[32m+[m[32m#   - Source Citations[m
+[32m+[m[32m#   - Faithfulness / Hallucination Checks[m
+ # =============================================================================[m
+ [m
+ import os[m
+[31m-import json[m
+[31m-import asyncio[m
+ import tempfile[m
+ from concurrent.futures import ThreadPoolExecutor[m
+ from typing import List, Dict, Any, Tuple[m
+ [m
+[31m-try:[m
+[31m-    import httpx  # type: ignore[import-not-found][m
+[31m-except ImportError:  # pragma: no cover - handled at runtime in app startup[m
+[31m-    httpx = None[m
+[32m+[m[32mimport streamlit as st[m
+[32m+[m[32mimport chromadb[m
+ [m
+[31m-import streamlit as st  # type: ignore[import-not-found][m
+[32m+[m[32mfrom groq import Groq[m
+ [m
+[31m-try:[m
+[31m-    import chromadb  # type: ignore[import-not-found][m
+[31m-except ImportError:  # pragma: no cover - handled at runtime in app startup[m
+[31m-    chromadb = None[m
+[32m+[m[32mfrom langchain_community.document_loaders import PyPDFLoader[m
+[32m+[m[32mfrom langchain_text_splitters import RecursiveCharacterTextSplitter[m
+ [m
+[31m-from langchain_community.document_loaders import PyPDFLoader  # type: ignore[import-not-found][m
+[31m-from langchain_text_splitters import RecursiveCharacterTextSplitter  # type: ignore[import-not-found][m
+ [m
+[32m+[m[32m# -----------------------------------------------------------------------------[m
+ # Modular RAG Components[m
+[32m+[m[32m# -----------------------------------------------------------------------------[m
+[32m+[m
+ from retriever import retrieve_documents[m
+ from reranker import rerank_documents[m
+ from hallucination_checker import check_hallucination[m
+ from hybrid_search import hybrid_retrieve[m
+[31m-from convo_memory import condense_question[m
+[32m+[m
+ [m
+ # -----------------------------------------------------------------------------[m
+[31m-# 1. Page Configuration & Custom UI Styling[m
+[32m+[m[32m# 1. PAGE CONFIGURATION[m
+ # -----------------------------------------------------------------------------[m
+[32m+[m
+ st.set_page_config([m
+     page_title="AetherAI — Intelligent Assistant",[m
+     page_icon="🌌",[m
+[36m@@ -43,313 +47,1398 @@[m [mst.set_page_config([m
+     initial_sidebar_state="expanded"[m
+ )[m
+ [m
+[31m-# Visual styling for cards, metrics, and indicators[m
+[31m-st.markdown("""[m
+[31m-<style>[m
+[31m-    .main-title {[m
+[31m-        font-size: 2.3rem;[m
+[31m-        font-weight: 800;[m
+[31m-        letter-spacing: -0.5px;[m
+[31m-        margin-bottom: 0.2rem;[m
+[31m-    }[m
+[31m-    .sub-title {[m
+[31m-        font-size: 1rem;[m
+[31m-        color: #6c757d;[m
+[31m-        margin-bottom: 1.5rem;[m
+[31m-    }[m
+[31m-    .citation-card {[m
+[31m-        background-color: #f8f9fa;[m
+[31m-        border-left: 4px solid #6C5CE7;[m
+[31m-        padding: 10px 14px;[m
+[31m-        margin-top: 8px;[m
+[31m-        border-radius: 4px;[m
+[31m-        font-size: 0.9rem;[m
+[31m-    }[m
+[31m-    .badge-grounded {[m
+[31m-        background-color: #d4edda;[m
+[31m-        color: #155724;[m
+[31m-        padding: 4px 10px;[m
+[31m-        border-radius: 12px;[m
+[31m-        font-weight: 600;[m
+[31m-        font-size: 0.85rem;[m
+[31m-        display: inline-block;[m
+[31m-    }[m
+[31m-    .badge-warning {[m
+[31m-        background-color: #f8d7da;[m
+[31m-        color: #721c24;[m
+[31m-        padding: 4px 10px;[m
+[31m-        border-radius: 12px;[m
+[31m-        font-weight: 600;[m
+[31m-        font-size: 0.85rem;[m
+[31m-        display: inline-block;[m
+[31m-    }[m
+[31m-</style>[m
+[31m-""", unsafe_allow_html=True)[m
+[31m-[m
+[31m-# -----------------------------------------------------------------------------[m
+[31m-# 2. Parallel Processing & Persistent Client[m
+[31m-# -----------------------------------------------------------------------------[m
+[31m-MAX_WORKERS = min(32, (os.cpu_count() or 1) + 4)[m
+[31m-executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)[m
+[32m+[m
+[32m+[m[32m# -----------------------------------------------------------------------------[m
+[32m+[m[32m# 2. CUSTOM UI STYLING[m
+[32m+[m[32m# -----------------------------------------------------------------------------[m
+[32m+[m
+[32m+[m[32mst.markdown([m
+[32m+[m[32m    """[m
+[32m+[m[32m    <style>[m
+[32m+[m
+[32m+[m[32m        .main-title {[m
+[32m+[m[32m            font-size: 2.3rem;[m
+[32m+[m[32m            font-weight: 800;[m
+[32m+[m[32m            letter-spacing: -0.5px;[m
+[32m+[m[32m            margin-bottom: 0.2rem;[m
+[32m+[m[32m        }[m
+[32m+[m
+[32m+[m[32m        .sub-title {[m
+[32m+[m[32m            font-size: 1rem;[m
+[32m+[m[32m            color: #6c757d;[m
+[32m+[m[32m            margin-bottom: 1.5rem;[m
+[32m+[m[32m        }[m
+[32m+[m
+[32m+[m[32m        .citation-card {[m
+[32m+[m[32m            background-color: #f8f9fa;[m
+[32m+[m[32m            border-left: 4px solid #6C5CE7;[m
+[32m+[m[32m            padding: 10px 14px;[m
+[32m+[m[32m            margin-top: 8px;[m
+[32m+[m[32m            border-radius: 4px;[m
+[32m+[m[32m            font-size: 0.9rem;[m
+[32m+[m[32m        }[m
+[32m+[m
+[32m+[m[32m        .badge-grounded {[m
+[32m+[m[32m            background-color: #d4edda;[m
+[32m+[m[32m            color: #155724;[m
+[32m+[m[32m            padding: 4px 10px;[m
+[32m+[m[32m            border-radius: 12px;[m
+[32m+[m[32m            font-weight: 600;[m
+[32m+[m[32m            font-size: 0.85rem;[m
+[32m+[m[32m            display: inline-block;[m
+[32m+[m[32m        }[m
+[32m+[m
+[32m+[m[32m        .badge-warning {[m
+[32m+[m[32m            background-color: #f8d7da;[m
+[32m+[m[32m            color: #721c24;[m
+[32m+[m[32m            padding: 4px 10px;[m
+[32m+[m[32m            border-radius: 12px;[m
+[32m+[m[32m            font-weight: 600;[m
+[32m+[m[32m            font-size: 0.85rem;[m
+[32m+[m[32m            display: inline-block;[m
+[32m+[m[32m        }[m
+[32m+[m
+[32m+[m[32m    </style>[m
+[32m+[m[32m    """,[m
+[32m+[m[32m    unsafe_allow_html=True[m
+[32m+[m[32m)[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# -----------------------------------------------------------------------------[m
+[32m+[m[32m# 3. CONFIGURATION[m
+[32m+[m[32m# -----------------------------------------------------------------------------[m
+[32m+[m
+[32m+[m[32mMAX_WORKERS = min([m
+[32m+[m[32m    32,[m
+[32m+[m[32m    (os.cpu_count() or 1) + 4[m
+[32m+[m[32m)[m
+[32m+[m
+[32m+[m[32mexecutor = ThreadPoolExecutor([m
+[32m+[m[32m    max_workers=MAX_WORKERS[m
+[32m+[m[32m)[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# Groq model[m
+[32m+[m[32mDEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"[m
+[32m+[m
+[32m+[m[32m# Embedding model used by your RAG retriever[m
+[32m+[m[32mEMBEDDING_MODEL = "all-MiniLM-L6-v2"[m
+[32m+[m
+[32m+[m[32m# Default reranker[m
+[32m+[m[32mDEFAULT_RERANKER_MODEL = ([m
+[32m+[m[32m    "cross-encoder/ms-marco-MiniLM-L-6-v2"[m
+[32m+[m[32m)[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# -----------------------------------------------------------------------------[m
+[32m+[m[32m# 4. GROQ CLIENT[m
+[32m+[m[32m# -----------------------------------------------------------------------------[m
+[32m+[m
+[32m+[m[32m@st.cache_resource[m
+[32m+[m[32mdef get_groq_client():[m
+[32m+[m
+[32m+[m[32m    """[m
+[32m+[m[32m    Create a single Groq client.[m
+[32m+[m
+[32m+[m[32m    Local:[m
+[32m+[m[32m        Reads GROQ_API_KEY from environment.[m
+[32m+[m
+[32m+[m[32m    Streamlit Cloud:[m
+[32m+[m[32m        Reads GROQ_API_KEY from st.secrets.[m
+[32m+[m[32m    """[m
+[32m+[m
+[32m+[m[32m    api_key = None[m
+[32m+[m
+[32m+[m[32m    # ---------------------------------------------------------[m
+[32m+[m[32m    # Try Streamlit Secrets[m
+[32m+[m[32m    # ---------------------------------------------------------[m
+[32m+[m
+[32m+[m[32m    try:[m
+[32m+[m
+[32m+[m[32m        api_key = st.secrets.get([m
+[32m+[m[32m            "GROQ_API_KEY"[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m    except Exception:[m
+[32m+[m
+[32m+[m[32m        api_key = None[m
+[32m+[m
+[32m+[m[32m    # ---------------------------------------------------------[m
+[32m+[m[32m    # Try environment variable[m
+[32m+[m[32m    # ---------------------------------------------------------[m
+[32m+[m
+[32m+[m[32m    if not api_key:[m
+[32m+[m
+[32m+[m[32m        api_key = os.getenv([m
+[32m+[m[32m            "GROQ_API_KEY"[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m    # ---------------------------------------------------------[m
+[32m+[m[32m    # Validate[m
+[32m+[m[32m    # ---------------------------------------------------------[m
+[32m+[m
+[32m+[m[32m    if not api_key:[m
+[32m+[m
+[32m+[m[32m        return None[m
+[32m+[m
+[32m+[m[32m    return Groq([m
+[32m+[m[32m        api_key=api_key[m
+[32m+[m[32m    )[m
+[32m+[m
+[32m+[m
+[32m+[m[32mgroq_client = get_groq_client()[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# -----------------------------------------------------------------------------[m
+[32m+[m[32m# 5. CHROMADB CLIENT[m
+[32m+[m[32m# -----------------------------------------------------------------------------[m
+ [m
+ @st.cache_resource[m
+ def get_chroma_client() -> Any:[m
+[31m-    """Returns a single persistent client instance for ChromaDB."""[m
+[32m+[m
+[32m+[m[32m    """[m
+[32m+[m[32m    Returns a persistent ChromaDB client.[m
+[32m+[m[32m    """[m
+[32m+[m
+     if chromadb is None:[m
+[31m-        raise RuntimeError("ChromaDB is not installed. Please install the chromadb package.")[m
+[31m-    return chromadb.PersistentClient(path="./chroma_db")[m
+[32m+[m
+[32m+[m[32m        raise RuntimeError([m
+[32m+[m[32m            "ChromaDB is not installed. "[m
+[32m+[m[32m            "Please install the chromadb package."[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m    return chromadb.PersistentClient([m
+[32m+[m[32m        path="./chroma_db"[m
+[32m+[m[32m    )[m
+[32m+[m
+ [m
+ chroma_client = get_chroma_client()[m
+[31m-collection = chroma_client.get_or_create_collection(name="aether_knowledge_base")[m
+[32m+[m
+[32m+[m
+[32m+[m[32mcollection = chroma_client.get_or_create_collection([m
+[32m+[m[32m    name="aether_knowledge_base"[m
+[32m+[m[32m)[m
+[32m+[m
+ [m
+ # -----------------------------------------------------------------------------[m
+[31m-# 3. Sidebar Configuration[m
+[32m+[m[32m# 6. SIDEBAR CONFIGURATION[m
+ # -----------------------------------------------------------------------------[m
+[32m+[m
+ with st.sidebar:[m
+[31m-    st.title("🌌 Aether Settings")[m
+[31m-    [m
+[31m-    st.subheader("🤖 Model Engine")[m
+[31m-    llm_model = st.text_input("Ollama Model", value="llama3.2:1b")[m
+[31m-    reranker_model = st.text_input("Reranker Model", value="cross-encoder/ms-marco-MiniLM-L-6-v2")[m
+[32m+[m
+[32m+[m[32m    st.title([m
+[32m+[m[32m        "🌌 Aether Settings"[m
+[32m+[m[32m    )[m
+[32m+[m
+[32m+[m[32m    # -------------------------------------------------------------------------[m
+[32m+[m[32m    # Model Engine[m
+[32m+[m[32m    # -------------------------------------------------------------------------[m
+[32m+[m
+[32m+[m[32m    st.subheader([m
+[32m+[m[32m        "🤖 Model Engine"[m
+[32m+[m[32m    )[m
+[32m+[m
+[32m+[m[32m    groq_model = st.text_input([m
+[32m+[m[32m        "Groq Model",[m
+[32m+[m[32m        value=DEFAULT_GROQ_MODEL[m
+[32m+[m[32m    )[m
+[32m+[m
+[32m+[m[32m    reranker_model = st.text_input([m
+[32m+[m[32m        "Reranker Model",[m
+[32m+[m[32m        value=DEFAULT_RERANKER_MODEL[m
+[32m+[m[32m    )[m
+ [m
+     st.divider()[m
+[31m-    st.subheader("🔍 Knowledge Base (Optional)")[m
+[31m-    enable_rag = st.toggle("Enable Document Grounding", value=True)[m
+[31m-    [m
+[31m-    with st.expander("Advanced Retrieval Parameters"):[m
+[31m-        initial_top_k = st.slider("Initial Document Recall (K)", min_value=2, max_value=20, value=6)[m
+[31m-        final_top_k = st.slider("Final Reranked Context (K)", min_value=1, max_value=8, value=3)[m
+[31m-        enable_hybrid = st.checkbox("Enable Hybrid BM25 Fusion", value=True)[m
+[32m+[m
+[32m+[m[32m    # -------------------------------------------------------------------------[m
+[32m+[m[32m    # Knowledge Base[m
+[32m+[m[32m    # -------------------------------------------------------------------------[m
+[32m+[m
+[32m+[m[32m    st.subheader([m
+[32m+[m[32m        "🔍 Knowledge Base"[m
+[32m+[m[32m    )[m
+[32m+[m
+[32m+[m[32m    enable_rag = st.toggle([m
+[32m+[m[32m        "Enable Document Grounding",[m
+[32m+[m[32m        value=True[m
+[32m+[m[32m    )[m
+[32m+[m
+[32m+[m[32m    with st.expander([m
+[32m+[m[32m        "Advanced Retrieval Parameters"[m
+[32m+[m[32m    ):[m
+[32m+[m
+[32m+[m[32m        initial_top_k = st.slider([m
+[32m+[m[32m            "Initial Document Recall (K)",[m
+[32m+[m[32m            min_value=2,[m
+[32m+[m[32m            max_value=20,[m
+[32m+[m[32m            value=6[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        final_top_k = st.slider([m
+[32m+[m[32m            "Final Reranked Context (K)",[m
+[32m+[m[32m            min_value=1,[m
+[32m+[m[32m            max_value=8,[m
+[32m+[m[32m            value=3[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        enable_hybrid = st.checkbox([m
+[32m+[m[32m            "Enable Hybrid BM25 Fusion",[m
+[32m+[m[32m            value=True[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m    # -------------------------------------------------------------------------[m
+[32m+[m[32m    # PDF Upload[m
+[32m+[m[32m    # -------------------------------------------------------------------------[m
+ [m
+     uploaded_files = st.file_uploader([m
+[31m-        "Upload PDFs to extend Aether's memory", [m
+[31m-        type=["pdf"], [m
+[32m+[m[32m        "Upload PDFs to extend Aether's memory",[m
+[32m+[m[32m        type=["pdf"],[m
+         accept_multiple_files=True[m
+     )[m
+ [m
+[31m-    # Worker function for background parsing[m
+[31m-    def _parse_pdf(uploaded_file) -> Tuple[List[str], List[Dict[str, Any]], List[str]]:[m
+[31m-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)[m
+[31m-        docs, metas, ids = [], [], [][m
+[32m+[m[32m    # -------------------------------------------------------------------------[m
+[32m+[m[32m    # PDF PARSER[m
+[32m+[m[32m    # -------------------------------------------------------------------------[m
+[32m+[m
+[32m+[m[32m    def _parse_pdf([m
+[32m+[m[32m        uploaded_file[m
+[32m+[m[32m    ) -> Tuple[[m
+[32m+[m[32m        List[str],[m
+[32m+[m[32m        List[Dict[str, Any]],[m
+[32m+[m[32m        List[str][m
+[32m+[m[32m    ]:[m
+[32m+[m
+[32m+[m[32m        text_splitter = RecursiveCharacterTextSplitter([m
+[32m+[m[32m            chunk_size=1000,[m
+[32m+[m[32m            chunk_overlap=150[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        docs = [][m
+[32m+[m[32m        metas = [][m
+[32m+[m[32m        ids = [][m
+[32m+[m
+[32m+[m[32m        # -----------------------------------------------------[m
+[32m+[m[32m        # Create temporary PDF[m
+[32m+[m[32m        # -----------------------------------------------------[m
+[32m+[m
+[32m+[m[32m        with tempfile.NamedTemporaryFile([m
+[32m+[m[32m            delete=False,[m
+[32m+[m[32m            suffix=".pdf"[m
+[32m+[m[32m        ) as tmp:[m
+[32m+[m
+[32m+[m[32m            tmp.write([m
+[32m+[m[32m                uploaded_file.read()[m
+[32m+[m[32m            )[m
+ [m
+[31m-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:[m
+[31m-            tmp.write(uploaded_file.read())[m
+             tmp_path = tmp.name[m
+ [m
+         try:[m
+[31m-            loader = PyPDFLoader(tmp_path)[m
+[32m+[m
+[32m+[m[32m            # -------------------------------------------------[m
+[32m+[m[32m            # Load PDF[m
+[32m+[m[32m            # -------------------------------------------------[m
+[32m+[m
+[32m+[m[32m            loader = PyPDFLoader([m
+[32m+[m[32m                tmp_path[m
+[32m+[m[32m            )[m
+[32m+[m
+             documents = loader.load()[m
+[31m-            splits = text_splitter.split_documents(documents)[m
+[31m-[m
+[31m-            for i, split in enumerate(splits):[m
+[31m-                docs.append(split.page_content)[m
+[31m-                metas.append({[m
+[31m-                    "source": uploaded_file.name,[m
+[31m-                    "page": split.metadata.get("page", 0) + 1[m
+[31m-                })[m
+[31m-                ids.append(f"{uploaded_file.name}_chunk_{i}")[m
+[32m+[m
+[32m+[m[32m            # -------------------------------------------------[m
+[32m+[m[32m            # Split into chunks[m
+[32m+[m[32m            # -------------------------------------------------[m
+[32m+[m
+[32m+[m[32m            splits = text_splitter.split_documents([m
+[32m+[m[32m                documents[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            # -------------------------------------------------[m
+[32m+[m[32m            # Create metadata[m
+[32m+[m[32m            # -------------------------------------------------[m
+[32m+[m
+[32m+[m[32m            for i, split in enumerate([m
+[32m+[m[32m                splits[m
+[32m+[m[32m            ):[m
+[32m+[m
+[32m+[m[32m                docs.append([m
+[32m+[m[32m                    split.page_content[m
+[32m+[m[32m                )[m
+[32m+[m
+[32m+[m[32m                metas.append([m
+[32m+[m[32m                    {[m
+[32m+[m[32m                        "source": uploaded_file.name,[m
+[32m+[m[32m                        "page": split.metadata.get([m
+[32m+[m[32m                            "page",[m
+[32m+[m[32m                            0[m
+[32m+[m[32m                        ) + 1[m
+[32m+[m[32m                    }[m
+[32m+[m[32m                )[m
+[32m+[m
+[32m+[m[32m                ids.append([m
+[32m+[m[32m                    f"{uploaded_file.name}_chunk_{i}"[m
+[32m+[m[32m                )[m
+[32m+[m
+         finally:[m
+[31m-            if os.path.exists(tmp_path):[m
+[31m-                os.remove(tmp_path)[m
+[31m-[m
+[31m-        return docs, metas, ids[m
+[31m-[m
+[31m-    if uploaded_files and st.button("Index Documents", use_container_width=True):[m
+[31m-        with st.spinner("Ingesting files in parallel..."):[m
+[31m-            futures = [executor.submit(_parse_pdf, f) for f in uploaded_files][m
+[31m-            [m
+[31m-            all_docs, all_metas, all_ids = [], [], [][m
+[31m-            for future in futures:[m
+[31m-                d, m, i = future.result()[m
+[31m-                all_docs.extend(d)[m
+[31m-                all_metas.extend(m)[m
+[31m-                all_ids.extend(i)[m
+[31m-[m
+[31m-            if all_docs:[m
+[31m-                collection.add(documents=all_docs, metadatas=all_metas, ids=all_ids)[m
+[31m-                st.success(f"Added {len(all_docs)} chunk(s) to knowledge base!")[m
+[31m-[m
+[31m-    doc_count = collection.count()[m
+[32m+[m
+[32m+[m[32m            if os.path.exists([m
+[32m+[m[32m                tmp_path[m
+[32m+[m[32m            ):[m
+[32m+[m
+[32m+[m[32m                os.remove([m
+[32m+[m[32m                    tmp_path[m
+[32m+[m[32m                )[m
+[32m+[m
+[32m+[m[32m        return ([m
+[32m+[m[32m            docs,[m
+[32m+[m[32m            metas,[m
+[32m+[m[32m            ids[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m    # -------------------------------------------------------------------------[m
+[32m+[m[32m    # Index Uploaded Documents[m
+[32m+[m[32m    # -------------------------------------------------------------------------[m
+[32m+[m
+[32m+[m[32m    if uploaded_files:[m
+[32m+[m
+[32m+[m[32m        if st.button([m
+[32m+[m[32m            "📥 Index Documents",[m
+[32m+[m[32m            use_container_width=True[m
+[32m+[m[32m        ):[m
+[32m+[m
+[32m+[m[32m            with st.spinner([m
+[32m+[m[32m                "Ingesting files in parallel..."[m
+[32m+[m[32m            ):[m
+[32m+[m
+[32m+[m[32m                futures = [[m
+[32m+[m[32m                    executor.submit([m
+[32m+[m[32m                        _parse_pdf,[m
+[32m+[m[32m                        f[m
+[32m+[m[32m                    )[m
+[32m+[m
+[32m+[m[32m                    for f in uploaded_files[m
+[32m+[m[32m                ][m
+[32m+[m
+[32m+[m[32m                all_docs = [][m
+[32m+[m[32m                all_metas = [][m
+[32m+[m[32m                all_ids = [][m
+[32m+[m
+[32m+[m[32m                for future in futures:[m
+[32m+[m
+[32m+[m[32m                    d, m, i = future.result()[m
+[32m+[m
+[32m+[m[32m                    all_docs.extend(d)[m
+[32m+[m[32m                    all_metas.extend(m)[m
+[32m+[m[32m                    all_ids.extend(i)[m
+[32m+[m
+[32m+[m[32m                # -------------------------------------------------------------[m
+[32m+[m[32m                # Add to ChromaDB[m
+[32m+[m[32m                # -------------------------------------------------------------[m
+[32m+[m
+[32m+[m[32m                if all_docs:[m
+[32m+[m
+[32m+[m[32m                    collection.add([m
+[32m+[m[32m                        documents=all_docs,[m
+[32m+[m[32m                        metadatas=all_metas,[m
+[32m+[m[32m                        ids=all_ids[m
+[32m+[m[32m                    )[m
+[32m+[m
+[32m+[m[32m                    st.success([m
+[32m+[m[32m                        f"Added {len(all_docs)} chunk(s) "[m
+[32m+[m[32m                        "to knowledge base!"[m
+[32m+[m[32m                    )[m
+[32m+[m
+[32m+[m[32m    # -------------------------------------------------------------------------[m
+[32m+[m[32m    # Knowledge Base Metrics[m
+[32m+[m[32m    # -------------------------------------------------------------------------[m
+[32m+[m
+[32m+[m[32m    try:[m
+[32m+[m
+[32m+[m[32m        doc_count = collection.count()[m
+[32m+[m
+[32m+[m[32m    except Exception:[m
+[32m+[m
+[32m+[m[32m        doc_count = 0[m
+[32m+[m
+     st.divider()[m
+[32m+[m
+     col1, col2 = st.columns(2)[m
+[31m-    col1.metric("Indexed Chunks", doc_count)[m
+[31m-    col2.metric("Worker Threads", MAX_WORKERS)[m
+[32m+[m
+[32m+[m[32m    col1.metric([m
+[32m+[m[32m        "Indexed Chunks",[m
+[32m+[m[32m        doc_count[m
+[32m+[m[32m    )[m
+[32m+[m
+[32m+[m[32m    col2.metric([m
+[32m+[m[32m        "Worker Threads",[m
+[32m+[m[32m        MAX_WORKERS[m
+[32m+[m[32m    )[m
+[32m+[m
+[32m+[m[32m    # -------------------------------------------------------------------------[m
+[32m+[m[32m    # Groq Status[m
+[32m+[m[32m    # -------------------------------------------------------------------------[m
+[32m+[m
+[32m+[m[32m    st.divider()[m
+[32m+[m
+[32m+[m[32m    st.subheader([m
+[32m+[m[32m        "☁️ Cloud LLM"[m
+[32m+[m[32m    )[m
+[32m+[m
+[32m+[m[32m    if groq_client is not None:[m
+[32m+[m
+[32m+[m[32m        st.success([m
+[32m+[m[32m            "Groq Connected"[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        st.caption([m
+[32m+[m[32m            f"Model: {groq_model}"[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m    else:[m
+[32m+[m
+[32m+[m[32m        st.error([m
+[32m+[m[32m            "Groq API key not configured"[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        st.caption([m
+[32m+[m[32m            "Add GROQ_API_KEY to your environment "[m
+[32m+[m[32m            "or Streamlit secrets."[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# -----------------------------------------------------------------------------[m
+[32m+[m[32m# 7. GROQ QUERY REWRITING[m
+[32m+[m[32m# -----------------------------------------------------------------------------[m
+[32m+[m
+[32m+[m[32mdef rewrite_query_with_groq([m
+[32m+[m[32m    question: str,[m
+[32m+[m[32m    chat_history: str[m
+[32m+[m[32m) -> str:[m
+[32m+[m
+[32m+[m[32m    """[m
+[32m+[m[32m    Convert conversational questions into standalone[m
+[32m+[m[32m    retrieval queries.[m
+[32m+[m
+[32m+[m[32m    Example:[m
+[32m+[m
+[32m+[m[32m        Previous:[m
+[32m+[m[32m        What is machine learning?[m
+[32m+[m
+[32m+[m[32m        Current:[m
+[32m+[m[32m        What are its types?[m
+[32m+[m
+[32m+[m[32m        Result:[m
+[32m+[m[32m        types of machine learning supervised[m
+[32m+[m[32m        unsupervised reinforcement learning[m
+[32m+[m[32m    """[m
+[32m+[m
+[32m+[m[32m    # ---------------------------------------------------------[m
+[32m+[m[32m    # If Groq unavailable[m
+[32m+[m[32m    # ---------------------------------------------------------[m
+[32m+[m
+[32m+[m[32m    if groq_client is None:[m
+[32m+[m
+[32m+[m[32m        return question[m
+[32m+[m
+[32m+[m[32m    prompt = f"""[m
+[32m+[m[32mYou are the query rewriting component of a RAG system.[m
+[32m+[m
+[32m+[m[32mRewrite the user's latest question into a clear,[m
+[32m+[m[32mstandalone search query for retrieving information[m
+[32m+[m[32mfrom a document knowledge base.[m
+[32m+[m
+[32m+[m[32mConversation history:[m
+[32m+[m[32m{chat_history}[m
+[32m+[m
+[32m+[m[32mLatest user question:[m
+[32m+[m[32m{question}[m
+[32m+[m
+[32m+[m[32mRules:[m
+[32m+[m
+[32m+[m[32m1. Resolve pronouns such as:[m
+[32m+[m[32m   it, this, that, they, them.[m
+[32m+[m
+[32m+[m[32m2. Use conversation history when needed.[m
+[32m+[m
+[32m+[m[32m3. Preserve the original meaning.[m
+[32m+[m
+[32m+[m[32m4. Add useful keywords when appropriate.[m
+[32m+[m
+[32m+[m[32m5. Do not answer the question.[m
+[32m+[m
+[32m+[m[32m6. Do not explain anything.[m
+[32m+[m
+[32m+[m[32m7. Return ONLY the rewritten search query.[m
+[32m+[m
+[32m+[m[32mExample:[m
+[32m+[m
+[32m+[m[32mConversation:[m
+[32m+[m[32mUser: What is machine learning?[m
+[32m+[m[32mAssistant: Machine learning is...[m
+[32m+[m
+[32m+[m[32mUser: What are its types?[m
+[32m+[m
+[32m+[m[32mOutput:[m
+[32m+[m[32mtypes of machine learning supervised unsupervised reinforcement learning[m
+[32m+[m[32m"""[m
+[32m+[m
+[32m+[m[32m    try:[m
+[32m+[m
+[32m+[m[32m        response = groq_client.chat.completions.create([m
+[32m+[m
+[32m+[m[32m            model=groq_model,[m
+[32m+[m
+[32m+[m[32m            messages=[[m
+[32m+[m[32m                {[m
+[32m+[m[32m                    "role": "system",[m
+[32m+[m[32m                    "content": ([m
+[32m+[m[32m                        "You rewrite questions for "[m
+[32m+[m[32m                        "semantic document retrieval."[m
+[32m+[m[32m                    )[m
+[32m+[m[32m                },[m
+[32m+[m[32m                {[m
+[32m+[m[32m                    "role": "user",[m
+[32m+[m[32m                    "content": prompt[m
+[32m+[m[32m                }[m
+[32m+[m[32m            ],[m
+[32m+[m
+[32m+[m[32m            temperature=0.1,[m
+[32m+[m
+[32m+[m[32m            max_tokens=120[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        rewritten = ([m
+[32m+[m[32m            response[m
+[32m+[m[32m            .choices[0][m
+[32m+[m[32m            .message[m
+[32m+[m[32m            .content[m
+[32m+[m[32m            .strip()[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        rewritten = rewritten.strip([m
+[32m+[m[32m            "\"'"[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        if not rewritten:[m
+[32m+[m
+[32m+[m[32m            return question[m
+[32m+[m
+[32m+[m[32m        return rewritten[m
+[32m+[m
+[32m+[m[32m    except Exception:[m
+[32m+[m
+[32m+[m[32m        return question[m
+[32m+[m
+ [m
+ # -----------------------------------------------------------------------------[m
+[31m-# 4. Async Streamer[m
+[32m+[m[32m# 8. GROQ STREAMING RESPONSE[m
+ # -----------------------------------------------------------------------------[m
+[31m-async def async_stream_response(prompt_text: str, model: str, container) -> str:[m
+[31m-    """Streams response generation without blocking Streamlit's event loop."""[m
+[31m-    url = "http://localhost:11434/api/generate"[m
+[31m-    payload = {"model": model, "prompt": prompt_text, "stream": True}[m
+[31m-    [m
+[32m+[m
+[32m+[m[32mdef stream_groq_response([m
+[32m+[m[32m    messages,[m
+[32m+[m[32m    model,[m
+[32m+[m[32m    container[m
+[32m+[m[32m) -> str:[m
+[32m+[m
+[32m+[m[32m    """[m
+[32m+[m[32m    Stream Groq response token-by-token into Streamlit.[m
+[32m+[m[32m    """[m
+[32m+[m
+[32m+[m[32m    if groq_client is None:[m
+[32m+[m
+[32m+[m[32m        error_message = ([m
+[32m+[m[32m            "⚠️ Groq API is not configured.\n\n"[m
+[32m+[m[32m            "Please configure `GROQ_API_KEY`."[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        container.markdown([m
+[32m+[m[32m            error_message[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        return error_message[m
+[32m+[m
+     full_text = ""[m
+[31m-    async with httpx.AsyncClient(timeout=60.0) as client:[m
+[31m-        try:[m
+[31m-            async with client.stream("POST", url, json=payload) as response:[m
+[31m-                if response.status_code == 200:[m
+[31m-                    async for line in response.aiter_lines():[m
+[31m-                        if line:[m
+[31m-                            data = json.loads(line)[m
+[31m-                            token = data.get("response", "")[m
+[31m-                            full_text += token[m
+[31m-                            container.markdown(full_text + "▌")[m
+[31m-                else:[m
+[31m-                    full_text = f"Error: Ollama API returned status code `{response.status_code}`."[m
+[31m-        except Exception as e:[m
+[31m-            full_text = f"Error connecting to Ollama: {e}"[m
+ [m
+[31m-    container.markdown(full_text)[m
+[31m-    return full_text[m
+[32m+[m[32m    try:[m
+[32m+[m
+[32m+[m[32m        stream = groq_client.chat.completions.create([m
+[32m+[m
+[32m+[m[32m            model=model,[m
+[32m+[m
+[32m+[m[32m            messages=messages,[m
+[32m+[m
+[32m+[m[32m            temperature=0.2,[m
+[32m+[m
+[32m+[m[32m            max_tokens=1000,[m
+[32m+[m
+[32m+[m[32m            stream=True[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        for chunk in stream:[m
+[32m+[m
+[32m+[m[32m            if not chunk.choices:[m
+[32m+[m
+[32m+[m[32m                continue[m
+[32m+[m
+[32m+[m[32m            delta = ([m
+[32m+[m[32m                chunk[m
+[32m+[m[32m                .choices[0][m
+[32m+[m[32m                .delta[m
+[32m+[m[32m                .content[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            if delta:[m
+[32m+[m
+[32m+[m[32m                full_text += delta[m
+[32m+[m
+[32m+[m[32m                container.markdown([m
+[32m+[m[32m                    full_text + "▌"[m
+[32m+[m[32m                )[m
+[32m+[m
+[32m+[m[32m        container.markdown([m
+[32m+[m[32m            full_text[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        return full_text[m
+[32m+[m
+[32m+[m[32m    except Exception as e:[m
+[32m+[m
+[32m+[m[32m        error_message = ([m
+[32m+[m[32m            f"❌ Groq API Error:\n\n"[m
+[32m+[m[32m            f"`{str(e)}`"[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        container.markdown([m
+[32m+[m[32m            error_message[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        return error_message[m
+[32m+[m
+ [m
+ # -----------------------------------------------------------------------------[m
+[31m-# 5. Application Interface & Message State[m
+[32m+[m[32m# 9. BUILD CHAT HISTORY FOR GROQ[m
+[32m+[m[32m# -----------------------------------------------------------------------------[m
+[32m+[m
+[32m+[m[32mdef build_chat_history([m
+[32m+[m[32m    messages,[m
+[32m+[m[32m    max_messages=10[m
+[32m+[m[32m):[m
+[32m+[m
+[32m+[m[32m    """[m
+[32m+[m[32m    Convert Streamlit message history into Groq messages.[m
+[32m+[m[32m    """[m
+[32m+[m
+[32m+[m[32m    history = [][m
+[32m+[m
+[32m+[m[32m    recent_messages = messages[[m
+[32m+[m[32m        -max_messages:[m
+[32m+[m[32m    ][m
+[32m+[m
+[32m+[m[32m    for message in recent_messages:[m
+[32m+[m
+[32m+[m[32m        role = message.get([m
+[32m+[m[32m            "role"[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        content = message.get([m
+[32m+[m[32m            "content",[m
+[32m+[m[32m            ""[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        # -----------------------------------------------------[m
+[32m+[m[32m        # Remove source HTML from historical messages[m
+[32m+[m[32m        # -----------------------------------------------------[m
+[32m+[m
+[32m+[m[32m        if role in [[m
+[32m+[m[32m            "user",[m
+[32m+[m[32m            "assistant"[m
+[32m+[m[32m        ]:[m
+[32m+[m
+[32m+[m[32m            history.append([m
+[32m+[m[32m                {[m
+[32m+[m[32m                    "role": role,[m
+[32m+[m[32m                    "content": content[m
+[32m+[m[32m                }[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m    return history[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# -----------------------------------------------------------------------------[m
+[32m+[m[32m# 10. MAIN APPLICATION UI[m
+[32m+[m[32m# -----------------------------------------------------------------------------[m
+[32m+[m
+[32m+[m[32mst.markdown([m
+[32m+[m[32m    '<div class="main-title">🌌 AetherAI</div>',[m
+[32m+[m[32m    unsafe_allow_html=True[m
+[32m+[m[32m)[m
+[32m+[m
+[32m+[m[32mst.markdown([m
+[32m+[m[32m    '<div class="sub-title">'[m
+[32m+[m[32m    'General Conversational Assistant & '[m
+[32m+[m[32m    'Specialized Knowledge Engine'[m
+[32m+[m[32m    '</div>',[m
+[32m+[m[32m    unsafe_allow_html=True[m
+[32m+[m[32m)[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# -----------------------------------------------------------------------------[m
+[32m+[m[32m# 11. SESSION STATE[m
+ # -----------------------------------------------------------------------------[m
+[31m-st.markdown('<div class="main-title">🌌 AetherAI</div>', unsafe_allow_html=True)[m
+[31m-st.markdown('<div class="sub-title">General Conversational Assistant & Specialized Knowledge Engine</div>', unsafe_allow_html=True)[m
+ [m
+ if "messages" not in st.session_state:[m
+[32m+[m
+     st.session_state.messages = [][m
+ [m
+[32m+[m
+[32m+[m[32m# -----------------------------------------------------------------------------[m
+[32m+[m[32m# 12. DISPLAY PREVIOUS CHAT[m
+[32m+[m[32m# -----------------------------------------------------------------------------[m
+[32m+[m
+ for msg in st.session_state.messages:[m
+[31m-    with st.chat_message(msg["role"]):[m
+[31m-        st.markdown(msg["content"], unsafe_allow_html=True)[m
+[32m+[m
+[32m+[m[32m    with st.chat_message([m
+[32m+[m[32m        msg["role"][m
+[32m+[m[32m    ):[m
+[32m+[m
+[32m+[m[32m        st.markdown([m
+[32m+[m[32m            msg["content"],[m
+[32m+[m[32m            unsafe_allow_html=True[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# -----------------------------------------------------------------------------[m
+[32m+[m[32m# 13. CHAT INPUT[m
+[32m+[m[32m# -----------------------------------------------------------------------------[m
+[32m+[m
+[32m+[m[32mprompt = st.chat_input([m
+[32m+[m[32m    "Ask Aether anything or query your uploaded documents..."[m
+[32m+[m[32m)[m
+[32m+[m
+ [m
+ # -----------------------------------------------------------------------------[m
+[31m-# 6. Response Generation Pipeline[m
+[32m+[m[32m# 14. PROCESS USER QUESTION[m
+ # -----------------------------------------------------------------------------[m
+[31m-if prompt := st.chat_input("Ask Aether anything or query your uploaded documents..."):[m
+[31m-    st.session_state.messages.append({"role": "user", "content": prompt})[m
+[31m-    with st.chat_message("user"):[m
+[31m-        st.markdown(prompt)[m
+ [m
+[31m-    with st.chat_message("assistant"):[m
+[32m+[m[32mif prompt:[m
+[32m+[m
+[32m+[m[32m    # -------------------------------------------------------------------------[m
+[32m+[m[32m    # Store User Message[m
+[32m+[m[32m    # -------------------------------------------------------------------------[m
+[32m+[m
+[32m+[m[32m    st.session_state.messages.append([m
+[32m+[m[32m        {[m
+[32m+[m[32m            "role": "user",[m
+[32m+[m[32m            "content": prompt[m
+[32m+[m[32m        }[m
+[32m+[m[32m    )[m
+[32m+[m
+[32m+[m[32m    with st.chat_message([m
+[32m+[m[32m        "user"[m
+[32m+[m[32m    ):[m
+[32m+[m
+[32m+[m[32m        st.markdown([m
+[32m+[m[32m            prompt[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m    # -------------------------------------------------------------------------[m
+[32m+[m[32m    # Assistant Message[m
+[32m+[m[32m    # -------------------------------------------------------------------------[m
+[32m+[m
+[32m+[m[32m    with st.chat_message([m
+[32m+[m[32m        "assistant"[m
+[32m+[m[32m    ):[m
+[32m+[m
+         response_placeholder = st.empty()[m
+[32m+[m
+         context = ""[m
+[32m+[m
+         citations_list = [][m
+[31m-        reranked_docs, reranked_metas = [], [][m
+ [m
+[31m-        # Check if we should attempt document retrieval[m
+[31m-        should_retrieve = enable_rag and (doc_count > 0)[m
+[32m+[m[32m        reranked_docs = [][m
+[32m+[m
+[32m+[m[32m        reranked_metas = [][m
+[32m+[m
+[32m+[m[32m        standalone_query = prompt[m
+[32m+[m
+[32m+[m[32m        # ---------------------------------------------------------------------[m
+[32m+[m[32m        # Determine if RAG should run[m
+[32m+[m[32m        # ---------------------------------------------------------------------[m
+[32m+[m
+[32m+[m[32m        should_retrieve = ([m
+[32m+[m[32m            enable_rag[m
+[32m+[m[32m            and doc_count > 0[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        # =====================================================================[m
+[32m+[m[32m        # RAG PIPELINE[m
+[32m+[m[32m        # =====================================================================[m
+ [m
+         if should_retrieve:[m
+[31m-            with st.status("Searching Knowledge Base...", expanded=False) as status:[m
+[32m+[m
+[32m+[m[32m            with st.status([m
+[32m+[m[32m                "Searching Knowledge Base...",[m
+[32m+[m[32m                expanded=False[m
+[32m+[m[32m            ) as status:[m
+[32m+[m
+                 try:[m
+[31m-                    # Memory condensation[m
+[31m-                    standalone_query = condense_question([m
+[31m-                        chat_history=st.session_state.messages[:-1],[m
+[31m-                        latest_question=prompt,[m
+[31m-                        model_name=llm_model[m
+[32m+[m
+[32m+[m[32m                    # ---------------------------------------------------------[m
+[32m+[m[32m                    # STEP 1: BUILD CONVERSATION HISTORY[m
+[32m+[m[32m                    # ---------------------------------------------------------[m
+[32m+[m
+[32m+[m[32m                    previous_messages = ([m
+[32m+[m[32m                        st.session_state.messages[:-1][m
+[32m+[m[32m                    )[m
+[32m+[m
+[32m+[m[32m                    history_text_parts = [][m
+[32m+[m
+[32m+[m[32m                    for message in previous_messages:[m
+[32m+[m
+[32m+[m[32m                        history_text_parts.append([m
+[32m+[m[32m                            f"{message['role']}: "[m
+[32m+[m[32m                            f"{message['content']}"[m
+[32m+[m[32m                        )[m
+[32m+[m
+[32m+[m[32m                    chat_history = "\n".join([m
+[32m+[m[32m                        history_text_parts[m
+                     )[m
+ [m
+[31m-                    # Vector retrieval[m
+[31m-                    v_docs, v_metas, v_ids = retrieve_documents([m
+[31m-                        query=standalone_query,[m
+[31m-                        collection_name="aether_knowledge_base",[m
+[31m-                        initial_top_k=initial_top_k,[m
+[31m-                        model_name=llm_model[m
+[32m+[m[32m                    # ---------------------------------------------------------[m
+[32m+[m[32m                    # STEP 2: QUERY REWRITING[m
+[32m+[m[32m                    # ---------------------------------------------------------[m
+[32m+[m
+[32m+[m[32m                    standalone_query = ([m
+[32m+[m[32m                        rewrite_query_with_groq([m
+[32m+[m[32m                            question=prompt,[m
+[32m+[m[32m                            chat_history=chat_history[m
+[32m+[m[32m                        )[m
+                     )[m
+ [m
+[31m-                    # BM25 Hybrid search[m
+[32m+[m[32m                    # ---------------------------------------------------------[m
+[32m+[m[32m                    # STEP 3: VECTOR RETRIEVAL[m
+[32m+[m[32m                    # ---------------------------------------------------------[m
+[32m+[m
+[32m+[m[32m                    v_docs, v_metas, v_ids = ([m
+[32m+[m[32m                        retrieve_documents([m
+[32m+[m
+[32m+[m[32m                            query=standalone_query,[m
+[32m+[m
+[32m+[m[32m                            collection_name=([m
+[32m+[m[32m                                "aether_knowledge_base"[m
+[32m+[m[32m                            ),[m
+[32m+[m
+[32m+[m[32m                            initial_top_k=initial_top_k,[m
+[32m+[m
+[32m+[m[32m                            # Important:[m
+[32m+[m[32m                            # This is the embedding model,[m
+[32m+[m[32m                            # NOT the Groq LLM.[m
+[32m+[m[32m                            model_name=EMBEDDING_MODEL[m
+[32m+[m[32m                        )[m
+[32m+[m[32m                    )[m
+[32m+[m
+[32m+[m[32m                    # ---------------------------------------------------------[m
+[32m+[m[32m                    # STEP 4: HYBRID SEARCH[m
+[32m+[m[32m                    # ---------------------------------------------------------[m
+[32m+[m
+                     if enable_hybrid:[m
+[32m+[m
+                         all_db = collection.get()[m
+[31m-                        retrieved_docs, retrieved_metas = hybrid_retrieve([m
+[31m-                            query=standalone_query,[m
+[31m-                            vector_docs=v_docs,[m
+[31m-                            vector_metas=v_metas,[m
+[31m-                            vector_ids=v_ids,[m
+[31m-                            all_collection_docs=all_db.get("documents", []),[m
+[31m-                            all_collection_metas=all_db.get("metadatas", []),[m
+[31m-                            all_collection_ids=all_db.get("ids", []),[m
+[31m-                            top_k=initial_top_k[m
+[32m+[m
+[32m+[m[32m                        retrieved_docs, retrieved_metas = ([m
+[32m+[m[32m                            hybrid_retrieve([m
+[32m+[m
+[32m+[m[32m                                query=standalone_query,[m
+[32m+[m
+[32m+[m[32m                                vector_docs=v_docs,[m
+[32m+[m
+[32m+[m[32m                                vector_metas=v_metas,[m
+[32m+[m
+[32m+[m[32m                                vector_ids=v_ids,[m
+[32m+[m
+[32m+[m[32m                                all_collection_docs=([m
+[32m+[m[32m                                    all_db.get([m
+[32m+[m[32m                                        "documents",[m
+[32m+[m[32m                                        [][m
+[32m+[m[32m                                    )[m
+[32m+[m[32m                                ),[m
+[32m+[m
+[32m+[m[32m                                all_collection_metas=([m
+[32m+[m[32m                                    all_db.get([m
+[32m+[m[32m                                        "metadatas",[m
+[32m+[m[32m                                        [][m
+[32m+[m[32m                                    )[m
+[32m+[m[32m                                ),[m
+[32m+[m
+[32m+[m[32m                                all_collection_ids=([m
+[32m+[m[32m                                    all_db.get([m
+[32m+[m[32m                                        "ids",[m
+[32m+[m[32m                                        [][m
+[32m+[m[32m                                    )[m
+[32m+[m[32m                                ),[m
+[32m+[m
+[32m+[m[32m                                top_k=initial_top_k[m
+[32m+[m[32m                            )[m
+                         )[m
+[32m+[m
+                     else:[m
+[31m-                        retrieved_docs, retrieved_metas = v_docs, v_metas[m
+[32m+[m
+[32m+[m[32m                        retrieved_docs = v_docs[m
+[32m+[m
+[32m+[m[32m                        retrieved_metas = v_metas[m
+[32m+[m
+[32m+[m[32m                    # ---------------------------------------------------------[m
+[32m+[m[32m                    # STEP 5: CROSSENCODER RERANKING[m
+[32m+[m[32m                    # ---------------------------------------------------------[m
+ [m
+                     if retrieved_docs:[m
+[31m-                        # Reranking[m
+[31m-                        reranked_docs, reranked_metas = rerank_documents([m
+[31m-                            query=standalone_query,[m
+[31m-                            documents=retrieved_docs,[m
+[31m-                            metadatas=retrieved_metas,[m
+[31m-                            top_k=final_top_k,[m
+[31m-                            model_name=reranker_model[m
+[32m+[m
+[32m+[m[32m                        reranked_docs, reranked_metas = ([m
+[32m+[m[32m                            rerank_documents([m
+[32m+[m
+[32m+[m[32m                                query=standalone_query,[m
+[32m+[m
+[32m+[m[32m                                documents=retrieved_docs,[m
+[32m+[m
+[32m+[m[32m                                metadatas=retrieved_metas,[m
+[32m+[m
+[32m+[m[32m                                top_k=final_top_k,[m
+[32m+[m
+[32m+[m[32m                                model_name=reranker_model[m
+[32m+[m[32m                            )[m
+                         )[m
+ [m
+[32m+[m[32m                    # ---------------------------------------------------------[m
+[32m+[m[32m                    # STEP 6: BUILD DOCUMENT CONTEXT[m
+[32m+[m[32m                    # ---------------------------------------------------------[m
+[32m+[m
+[32m+[m[32m                    if reranked_docs:[m
+[32m+[m
+                         context_chunks = [][m
+[31m-                        for idx, (doc, meta) in enumerate(zip(reranked_docs, reranked_metas), start=1):[m
+[31m-                            source_file = meta.get("source", "Document")[m
+[31m-                            page_num = meta.get("page", "N/A")[m
+[31m-                            context_chunks.append(f"[Doc {idx}] Source: {source_file} (Page {page_num})\n{doc}")[m
+[31m-                            citations_list.append({[m
+[31m-                                "index": idx,[m
+[31m-                                "source": source_file,[m
+[31m-                                "page": page_num,[m
+[31m-                                "excerpt": doc[:180] + "..." if len(doc) > 180 else doc[m
+[31m-                            })[m
+[31m-                        [m
+[31m-                        context = "\n\n".join(context_chunks)[m
+[31m-                        status.update(label="Relevant Documents Found!", state="complete")[m
+[32m+[m
+[32m+[m[32m                        for idx, ([m
+[32m+[m[32m                            doc,[m
+[32m+[m[32m                            meta[m
+[32m+[m[32m                        ) in enumerate([m
+[32m+[m[32m                            zip([m
+[32m+[m[32m                                reranked_docs,[m
+[32m+[m[32m                                reranked_metas[m
+[32m+[m[32m                            ),[m
+[32m+[m[32m                            start=1[m
+[32m+[m[32m                        ):[m
+[32m+[m
+[32m+[m[32m                            source_file = meta.get([m
+[32m+[m[32m                                "source",[m
+[32m+[m[32m                                "Document"[m
+[32m+[m[32m                            )[m
+[32m+[m
+[32m+[m[32m                            page_num = meta.get([m
+[32m+[m[32m                                "page",[m
+[32m+[m[32m                                "N/A"[m
+[32m+[m[32m                            )[m
+[32m+[m
+[32m+[m[32m                            # -------------------------------------------------[m
+[32m+[m[32m                            # Context chunk[m
+[32m+[m[32m                            # -------------------------------------------------[m
+[32m+[m
+[32m+[m[32m                            context_chunks.append([m
+[32m+[m[32m                                f"[Doc {idx}] "[m
+[32m+[m[32m                                f"Source: {source_file} "[m
+[32m+[m[32m                                f"(Page {page_num})\n"[m
+[32m+[m[32m                                f"{doc}"[m
+[32m+[m[32m                            )[m
+[32m+[m
+[32m+[m[32m                            # -------------------------------------------------[m
+[32m+[m[32m                            # Citation information[m
+[32m+[m[32m                            # -------------------------------------------------[m
+[32m+[m
+[32m+[m[32m                            citations_list.append([m
+[32m+[m[32m                                {[m
+[32m+[m[32m                                    "index": idx,[m
+[32m+[m[32m                                    "source": source_file,[m
+[32m+[m[32m                                    "page": page_num,[m
+[32m+[m[32m                                    "excerpt": ([m
+[32m+[m[32m                                        doc[:180] + "..."[m
+[32m+[m[32m                                        if len(doc) > 180[m
+[32m+[m[32m                                        else doc[m
+[32m+[m[32m                                    )[m
+[32m+[m[32m                                }[m
+[32m+[m[32m                            )[m
+[32m+[m
+[32m+[m[32m                        context = "\n\n".join([m
+[32m+[m[32m                            context_chunks[m
+[32m+[m[32m                        )[m
+[32m+[m
+[32m+[m[32m                        status.update([m
+[32m+[m[32m                            label=([m
+[32m+[m[32m                                "Relevant Documents Found!"[m
+[32m+[m[32m                            ),[m
+[32m+[m[32m                            state="complete"[m
+[32m+[m[32m                        )[m
+[32m+[m
+                     else:[m
+[31m-                        status.update(label="No document matches. Answering using general knowledge.", state="complete")[m
+[32m+[m
+[32m+[m[32m                        status.update([m
+[32m+[m[32m                            label=([m
+[32m+[m[32m                                "No document matches. "[m
+[32m+[m[32m                                "Using general knowledge."[m
+[32m+[m[32m                            ),[m
+[32m+[m[32m                            state="complete"[m
+[32m+[m[32m                        )[m
+ [m
+                 except Exception as e:[m
+[31m-                    status.update(label="Retrieval failed. Falling back to general mode.", state="error")[m
+ [m
+[31m-        # Dynamic System Prompt[m
+[32m+[m[32m                    status.update([m
+[32m+[m[32m                        label=([m
+[32m+[m[32m                            "Retrieval failed. "[m
+[32m+[m[32m                            "Using general mode."[m
+[32m+[m[32m                        ),[m
+[32m+[m[32m                        state="error"[m
+[32m+[m[32m                    )[m
+[32m+[m
+[32m+[m[32m                    st.warning([m
+[32m+[m[32m                        f"Retrieval error: {e}"[m
+[32m+[m[32m                    )[m
+[32m+[m
+[32m+[m[32m        # =====================================================================[m
+[32m+[m[32m        # GENERAL CHAT / RAG PROMPT[m
+[32m+[m[32m        # =====================================================================[m
+[32m+[m
+         if context:[m
+[31m-            system_prompt = f"""You are Aether, an expert AI assistant.[m
+[31m-Answer the question using the provided document context. Cite sources inline using [Doc X].[m
+ [m
+[31m-Document Context:[m
+[32m+[m[32m            system_message = f"""[m
+[32m+[m[32mYou are Aether, an expert AI assistant using[m
+[32m+[m[32mRetrieval-Augmented Generation.[m
+[32m+[m
+[32m+[m[32mAnswer the user's question using ONLY the[m
+[32m+[m[32mprovided document context.[m
+[32m+[m
+[32m+[m[32mIMPORTANT RULES:[m
+[32m+[m
+[32m+[m[32m1. Do not use outside knowledge for this answer.[m
+[32m+[m
+[32m+[m[32m2. Do not invent facts.[m
+[32m+[m
+[32m+[m[32m3. Do not make assumptions that are not supported[m
+[32m+[m[32m   by the provided context.[m
+[32m+[m
+[32m+[m[32m4. If the answer cannot be found in the context,[m
+[32m+[m[32m   say:[m
+[32m+[m
+[32m+[m[32m"The answer is not available in the uploaded documents."[m
+[32m+[m
+[32m+[m[32m5. Give a clear and useful explanation.[m
+[32m+[m
+[32m+[m[32m6. Cite supporting sources inline using:[m
+[32m+[m[32m[Doc 1], [Doc 2], etc.[m
+[32m+[m
+[32m+[m[32m7. Only cite documents that actually support the answer.[m
+[32m+[m
+[32m+[m[32mDOCUMENT CONTEXT:[m
+[32m+[m
+ {context}[m
+[32m+[m[32m"""[m
+ [m
+[31m-Question: {prompt}[m
+[31m-Answer:"""[m
+         else:[m
+[31m-            system_prompt = f"""You are Aether, a helpful, intelligent AI assistant.[m
+[31m-Answer the user's question clearly, accurately, and thoroughly using your general knowledge.[m
+ [m
+[31m-Question: {prompt}[m
+[31m-Answer:"""[m
+[32m+[m[32m            system_message = """[m
+[32m+[m[32mYou are Aether, a helpful and intelligent AI assistant.[m
+[32m+[m
+[32m+[m[32mAnswer the user's question clearly, accurately,[m
+[32m+[m[32mand thoroughly using your general knowledge.[m
+[32m+[m
+[32m+[m[32mBe conversational and helpful.[m
+[32m+[m
+[32m+[m[32mDo not claim that information comes from uploaded[m
+[32m+[m[32mdocuments when no document context was retrieved.[m
+[32m+[m[32m"""[m
+[32m+[m
+[32m+[m[32m        # =====================================================================[m
+[32m+[m[32m        # BUILD GROQ MESSAGE LIST[m
+[32m+[m[32m        # =====================================================================[m
+[32m+[m
+[32m+[m[32m        groq_messages = [[m
+[32m+[m[32m            {[m
+[32m+[m[32m                "role": "system",[m
+[32m+[m[32m                "content": system_message[m
+[32m+[m[32m            }[m
+[32m+[m[32m        ][m
+[32m+[m
+[32m+[m[32m        # ---------------------------------------------------------------------[m
+[32m+[m[32m        # Add previous conversation[m
+[32m+[m[32m        # ---------------------------------------------------------------------[m
+[32m+[m
+[32m+[m[32m        previous_chat = build_chat_history([m
+[32m+[m[32m            st.session_state.messages[:-1],[m
+[32m+[m[32m            max_messages=10[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        for message in previous_chat:[m
+[32m+[m
+[32m+[m[32m            groq_messages.append([m
+[32m+[m[32m                {[m
+[32m+[m[32m                    "role": message["role"],[m
+[32m+[m[32m                    "content": message["content"][m
+[32m+[m[32m                }[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m        # ---------------------------------------------------------------------[m
+[32m+[m[32m        # Current question[m
+[32m+[m[32m        # ---------------------------------------------------------------------[m
+[32m+[m
+[32m+[m[32m        groq_messages.append([m
+[32m+[m[32m            {[m
+[32m+[m[32m                "role": "user",[m
+[32m+[m[32m                "content": prompt[m
+[32m+[m[32m            }[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        # =====================================================================[m
+[32m+[m[32m        # STEP 7: GROQ RESPONSE STREAMING[m
+[32m+[m[32m        # =====================================================================[m
+ [m
+[31m-        # Stream response[m
+[31m-        raw_response = asyncio.run([m
+[31m-            async_stream_response(system_prompt, llm_model, response_placeholder)[m
+[32m+[m[32m        raw_response = stream_groq_response([m
+[32m+[m
+[32m+[m[32m            messages=groq_messages,[m
+[32m+[m
+[32m+[m[32m            model=groq_model,[m
+[32m+[m
+[32m+[m[32m            container=response_placeholder[m
+         )[m
+ [m
+[31m-        # Grounding evaluation (only run when document context was used)[m
+[32m+[m[32m        # =====================================================================[m
+[32m+[m[32m        # STEP 8: HALLUCINATION / GROUNDING CHECK[m
+[32m+[m[32m        # =====================================================================[m
+[32m+[m
+         badge_html = ""[m
+[32m+[m
+         if context and raw_response:[m
+[31m-            eval_result = check_hallucination(context, raw_response)[m
+[31m-            score_pct = int(eval_result["score"] * 100)[m
+[31m-            [m
+[31m-            if eval_result["is_grounded"]:[m
+[31m-                badge_html = f'<div class="badge-grounded">🟢 Grounding Confidence: {score_pct}%</div>'[m
+[31m-            else:[m
+[31m-                badge_html = f'<div class="badge-warning">🔴 Grounding Warning: Low Confidence ({score_pct}%)</div>'[m
+[31m-[m
+[31m-        # Render citations if documents were used[m
+[32m+[m
+[32m+[m[32m            try:[m
+[32m+[m
+[32m+[m[32m                eval_result = check_hallucination([m
+[32m+[m[32m                    context,[m
+[32m+[m[32m                    raw_response[m
+[32m+[m[32m                )[m
+[32m+[m
+[32m+[m[32m                score = float([m
+[32m+[m[32m                    eval_result.get([m
+[32m+[m[32m                        "score",[m
+[32m+[m[32m                        0[m
+[32m+[m[32m                    )[m
+[32m+[m[32m                )[m
+[32m+[m
+[32m+[m[32m                score_pct = int([m
+[32m+[m[32m                    score * 100[m
+[32m+[m[32m                )[m
+[32m+[m
+[32m+[m[32m                is_grounded = eval_result.get([m
+[32m+[m[32m                    "is_grounded",[m
+[32m+[m[32m                    False[m
+[32m+[m[32m                )[m
+[32m+[m
+[32m+[m[32m                if is_grounded:[m
+[32m+[m
+[32m+[m[32m                    badge_html = ([m
+[32m+[m[32m                        '<div class="badge-grounded">'[m
+[32m+[m[32m                        f'🟢 Grounding Confidence: '[m
+[32m+[m[32m                        f'{score_pct}%'[m
+[32m+[m[32m                        '</div>'[m
+[32m+[m[32m                    )[m
+[32m+[m
+[32m+[m[32m                else:[m
+[32m+[m
+[32m+[m[32m                    badge_html = ([m
+[32m+[m[32m                        '<div class="badge-warning">'[m
+[32m+[m[32m                        f'🔴 Grounding Warning: '[m
+[32m+[m[32m                        f'Low Confidence '[m
+[32m+[m[32m                        f'({score_pct}%)'[m
+[32m+[m[32m                        '</div>'[m
+[32m+[m[32m                    )[m
+[32m+[m
+[32m+[m[32m            except Exception as e:[m
+[32m+[m
+[32m+[m[32m                badge_html = ([m
+[32m+[m[32m                    '<div class="badge-warning">'[m
+[32m+[m[32m                    '⚠️ Grounding check unavailable'[m
+[32m+[m[32m                    '</div>'[m
+[32m+[m[32m                )[m
+[32m+[m
+[32m+[m[32m        # =====================================================================[m
+[32m+[m[32m        # STEP 9: SOURCE CITATIONS[m
+[32m+[m[32m        # =====================================================================[m
+[32m+[m
+         citations_html = ""[m
+[32m+[m
+         if citations_list:[m
+[31m-            citations_html += "\n\n### 📑 Source Citations\n"[m
+[32m+[m
+[32m+[m[32m            citations_html += ([m
+[32m+[m[32m                "\n\n### 📑 Source Citations\n"[m
+[32m+[m[32m            )[m
+[32m+[m
+             for cite in citations_list:[m
+[32m+[m
+                 citations_html += f"""[m
+ <div class="citation-card">[m
+[31m-    <strong>[Doc {cite['index']}] {cite['source']}</strong> (Page {cite['page']})<br/>[m
+[31m-    <em style="color: #555;">"{cite['excerpt']}"</em>[m
+[32m+[m[32m    <strong>[m
+[32m+[m[32m        [Doc {cite['index']}] {cite['source']}[m
+[32m+[m[32m    </strong>[m
+[32m+[m[32m    (Page {cite['page']})[m
+[32m+[m[32m    <br/>[m
+[32m+[m[32m    <em style="color: #555;">[m
+[32m+[m[32m        "{cite['excerpt']}"[m
+[32m+[m[32m    </em>[m
+ </div>[m
+ """[m
+ [m
+[31m-        final_content = f"{raw_response}\n\n{badge_html}\n{citations_html}"[m
+[31m-        response_placeholder.markdown(final_content, unsafe_allow_html=True)[m
+[32m+[m[32m        # =====================================================================[m
+[32m+[m[32m        # FINAL RESPONSE[m
+[32m+[m[32m        # =====================================================================[m
+[32m+[m
+[32m+[m[32m        final_content = ([m
+[32m+[m[32m            f"{raw_response}\n\n"[m
+[32m+[m[32m            f"{badge_html}\n"[m
+[32m+[m[32m            f"{citations_html}"[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        response_placeholder.markdown([m
+[32m+[m[32m            final_content,[m
+[32m+[m[32m            unsafe_allow_html=True[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        # =====================================================================[m
+[32m+[m[32m        # STEP 10: RETRIEVED CONTEXT INSPECTOR[m
+[32m+[m[32m        # =====================================================================[m
+ [m
+[31m-        # Reranked inspect expander[m
+         if reranked_docs:[m
+[31m-            with st.expander("🔍 View Retrieved Context Chunks"):[m
+[31m-                for idx, (doc, meta) in enumerate(zip(reranked_docs, reranked_metas), start=1):[m
+[31m-                    st.write(f"**Chunk [{idx}]** — `{meta.get('source')}` (Page {meta.get('page')})")[m
+[31m-                    st.caption(doc)[m
+[32m+[m
+[32m+[m[32m            with st.expander([m
+[32m+[m[32m                "🔍 View Retrieved Context Chunks"[m
+[32m+[m[32m            ):[m
+[32m+[m
+[32m+[m[32m                for idx, ([m
+[32m+[m[32m                    doc,[m
+[32m+[m[32m                    meta[m
+[32m+[m[32m                ) in enumerate([m
+[32m+[m[32m                    zip([m
+[32m+[m[32m                        reranked_docs,[m
+[32m+[m[32m                        reranked_metas[m
+[32m+[m[32m                    ),[m
+[32m+[m[32m                    start=1[m
+[32m+[m[32m                ):[m
+[32m+[m
+[32m+[m[32m                    st.write([m
+[32m+[m[32m                        f"**Chunk [{idx}]** — "[m
+[32m+[m[32m                        f"`{meta.get('source', 'Unknown')}` "[m
+[32m+[m[32m                        f"(Page "[m
+[32m+[m[32m                        f"{meta.get('page', 'N/A')})"[m
+[32m+[m[32m                    )[m
+[32m+[m
+[32m+[m[32m                    st.caption([m
+[32m+[m[32m                        doc[m
+[32m+[m[32m                    )[m
+[32m+[m
+                     st.divider()[m
+ [m
+[31m-        st.session_state.messages.append({"role": "assistant", "content": final_content})[m
+\ No newline at end of file[m
+[32m+[m[32m        # =====================================================================[m
+[32m+[m[32m        # STEP 11: PIPELINE DETAILS[m
+[32m+[m[32m        # =====================================================================[m
+[32m+[m
+[32m+[m[32m        with st.expander([m
+[32m+[m[32m            "⚙️ Pipeline Details"[m
+[32m+[m[32m        ):[m
+[32m+[m
+[32m+[m[32m            st.write([m
+[32m+[m[32m                "**Original Query:**"[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            st.code([m
+[32m+[m[32m                prompt[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            st.write([m
+[32m+[m[32m                "**Rewritten Search Query:**"[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            st.code([m
+[32m+[m[32m                standalone_query[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            st.write([m
+[32m+[m[32m                "**Embedding Model:**"[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            st.code([m
+[32m+[m[32m                EMBEDDING_MODEL[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            st.write([m
+[32m+[m[32m                "**Groq LLM:**"[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            st.code([m
+[32m+[m[32m                groq_model[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            st.write([m
+[32m+[m[32m                "**Initial Retrieved Documents:**"[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            st.write([m
+[32m+[m[32m                len([m
+[32m+[m[32m                    retrieved_docs[m
+[32m+[m[32m                )[m
+[32m+[m[32m                if should_retrieve[m
+[32m+[m[32m                else 0[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            st.write([m
+[32m+[m[32m                "**Final Reranked Chunks:**"[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            st.write([m
+[32m+[m[32m                len([m
+[32m+[m[32m                    reranked_docs[m
+[32m+[m[32m                )[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            st.write([m
+[32m+[m[32m                "**Hybrid Search:**"[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            st.write([m
+[32m+[m[32m                "Enabled"[m
+[32m+[m[32m                if enable_hybrid[m
+[32m+[m[32m                else "Disabled"[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            st.write([m
+[32m+[m[32m                "**Reranker:**"[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            st.code([m
+[32m+[m[32m                reranker_model[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m        # =====================================================================[m
+[32m+[m[32m        # STEP 12: SAVE ASSISTANT RESPONSE[m
+[32m+[m[32m        # =====================================================================[m
+[32m+[m
+[32m+[m[32m        st.session_state.messages.append([m
+[32m+[m[32m            {[m
+[32m+[m[32m                "role": "assistant",[m
+[32m+[m[32m                "content": final_content[m
+[32m+[m[32m            }[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# -----------------------------------------------------------------------------[m
+[32m+[m[32m# 15. FOOTER[m
+[32m+[m[32m# -----------------------------------------------------------------------------[m
+[32m+[m
+[32m+[m[32mst.divider()[m
+[32m+[m
+[32m+[m[32mst.caption([m
+[32m+[m[32m    "AetherAI • "[m
+[32m+[m[32m    "RAG + Hybrid Search + CrossEncoder + "[m
+[32m+[m[32m    "Groq Cloud LLM + Source Attribution"[m
+[32m+[m[32m)[m
+\ No newline at end of file[m

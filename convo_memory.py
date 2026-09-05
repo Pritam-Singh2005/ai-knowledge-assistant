@@ -1,47 +1,118 @@
-# =============================================================================
-# Module: Context-Aware Conversational Memory
-# Role: Rewrites follow-up questions into standalone vector queries.
-# =============================================================================
+# ============================================================
+# convo_memory.py
+# Conversation Memory Utilities
+# ============================================================
 
-import requests
-from typing import List, Dict
+
+MAX_HISTORY_MESSAGES = 10
+
+
+# ============================================================
+# ADD MESSAGE
+# ============================================================
+
+def add_message(
+    history,
+    role,
+    content
+):
+
+    history.append(
+        {
+            "role": role,
+            "content": content
+        }
+    )
+
+    return trim_history(
+        history
+    )
+
+
+# ============================================================
+# TRIM HISTORY
+# ============================================================
+
+def trim_history(
+    history,
+    max_messages=MAX_HISTORY_MESSAGES
+):
+
+    if len(history) <= max_messages:
+
+        return history
+
+    return history[
+        -max_messages:
+    ]
+
+
+# ============================================================
+# GET CHAT HISTORY
+# ============================================================
+
+def get_recent_history(
+    history,
+    max_messages=MAX_HISTORY_MESSAGES
+):
+
+    return history[
+        -max_messages:
+    ]
+
+
+# ============================================================
+# FORMAT HISTORY
+# ============================================================
+
+def format_history(
+    history
+):
+
+    if not history:
+
+        return ""
+
+    lines = []
+
+    for message in history:
+
+        role = message.get(
+            "role",
+            "user"
+        )
+
+        content = message.get(
+            "content",
+            ""
+        )
+
+        lines.append(
+            f"{role}: {content}"
+        )
+
+    return "\n".join(
+        lines
+    )
+
+
+# ============================================================
+# CONDENSE QUESTION
+# ============================================================
 
 def condense_question(
-    chat_history: List[Dict[str, str]], 
-    latest_question: str, 
-    model_name: str = "llama3.2:1b",
-    ollama_url: str = "http://localhost:11434"
-) -> str:
-    """
-    Converts a follow-up user query into an independent standalone query using chat history.
-    """
-    if not chat_history:
-        return latest_question
+    chat_history,
+    latest_question,
+    model_name=None
+):
 
-    # Format previous turns (up to last 3 exchanges)
-    formatted_history = ""
-    for msg in chat_history[-6:]:
-        role = "User" if msg["role"] == "user" else "Assistant"
-        formatted_history += f"{role}: {msg['content']}\n"
+    # Import here to avoid circular imports
+    from query_rewriter import rewrite_query
 
-    prompt = f"""Given the following conversation history and a follow-up question, rephrase the follow-up question into a standalone question that can be understood without the conversation history. Do NOT answer the question.
-
-Chat History:
-{formatted_history}
-
-Follow-up Question: {latest_question}
-Standalone Question:"""
-
-    try:
-        response = requests.post(
-            f"{ollama_url}/api/generate",
-            json={"model": model_name, "prompt": prompt, "stream": False},
-            timeout=10
-        )
-        if response.status_code == 200:
-            standalone = response.json().get("response", "").strip()
-            return standalone if standalone else latest_question
-    except Exception as e:
-        print(f"Memory condensation failed ({e}), using raw query.")
-
-    return latest_question
+    return rewrite_query(
+        latest_question=latest_question,
+        chat_history=chat_history,
+        model=model_name
+        if model_name
+        else "openai/gpt-oss-20b"
+    )

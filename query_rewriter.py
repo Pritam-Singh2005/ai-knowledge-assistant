@@ -1,97 +1,199 @@
-import ollama
-import re
+# ============================================================
+# query_rewriter.py
+# Conversational Query Rewriting
+# ============================================================
+
+import os
+
+from groq import Groq
 
 
-MODEL_NAME = "llama3.2:3b"
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
+
+FALLBACK_GROQ_MODELS = [
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b"
+]
 
 
-def rewrite_query(query, chat_history=None):
+# ============================================================
+# API KEY
+# ============================================================
 
-    query = query.strip()
+def get_api_key():
 
-    if not query:
-        return query
+    api_key = os.getenv(
+        "GROQ_API_KEY"
+    )
+
+    if not api_key:
+
+        raise RuntimeError(
+            "GROQ_API_KEY is not available."
+        )
+
+    return api_key
+
+
+# ============================================================
+# CLIENT
+# ============================================================
+
+def get_client():
+
+    return Groq(
+        api_key=get_api_key()
+    )
+
+
+# ============================================================
+# REWRITE QUERY
+# ============================================================
+
+def rewrite_query(
+    latest_question,
+    chat_history=None,
+    model=DEFAULT_GROQ_MODEL
+):
+
+    if not latest_question:
+
+        return ""
+
+    chat_history = (
+        chat_history or []
+    )
+
+    # No history means no rewriting required
+    if not chat_history:
+
+        return latest_question.strip()
 
     history_text = ""
 
-    if chat_history:
+    for message in chat_history[-6:]:
 
-        recent_history = chat_history[-6:]
+        role = message.get(
+            "role",
+            "user"
+        )
 
-        for message in recent_history:
+        content = message.get(
+            "content",
+            ""
+        )
 
-            role = message.get("role", "")
-            content = message.get("content", "")
-
-            if content:
-                history_text += (
-                    f"{role}: {content}\n"
-                )
+        history_text += (
+            f"{role}: {content}\n"
+        )
 
     prompt = f"""
-You are a query rewriting system for a RAG document chatbot.
-
-Your job is to rewrite the user's question into a concise,
-document-search query.
-
-Rules:
-
-1. Preserve the user's original meaning.
-2. Use conversation history when the question contains words
-   such as "it", "they", "this", "that", "its", etc.
-3. Add important keywords when useful.
-4. Do not answer the question.
-5. Return ONLY the rewritten search query.
-6. Do not use quotes.
-7. Do not add explanations.
+Rewrite the latest user question into a standalone
+search query for a Retrieval-Augmented Generation system.
 
 Conversation history:
 {history_text}
 
-Current user question:
-{query}
+Latest question:
+{latest_question}
 
-Rewritten search query:
+Rules:
+
+- Resolve references such as "it", "this", "that",
+  "they", "them", etc.
+- Preserve the exact meaning.
+- Do not answer the question.
+- Do not add facts.
+- Keep the query concise.
+- Return ONLY the rewritten query.
+
+Rewritten query:
 """
 
-    try:
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a query rewriting component "
+                "for a RAG system."
+            )
+        },
+        {
+            "role": "user",
+            "content": prompt
+        }
+    ]
 
-        response = ollama.chat(
-            model=MODEL_NAME,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            options={
-                "temperature": 0.0
-            }
-        )
+    client = get_client()
 
-        rewritten = response["message"]["content"].strip()
+    models = []
 
-        # Remove accidental labels
-        rewritten = re.sub(
-            r"^(rewritten search query|search query)\s*:\s*",
-            "",
-            rewritten,
-            flags=re.IGNORECASE
-        )
+    if model:
+        models.append(model)
 
-        rewritten = rewritten.strip()
+    for fallback in FALLBACK_GROQ_MODELS:
 
-        if not rewritten:
-            return query
+        if fallback not in models:
 
-        return rewritten
+            models.append(
+                fallback
+            )
 
-    except Exception as e:
+    for current_model in models:
 
-        print(
-            "Query rewriting error:",
-            e
-        )
+        try:
 
-        # Safe fallback
-        return query
+            response = (
+                client.chat.completions.create(
+                    model=current_model,
+                    messages=messages,
+                    temperature=0,
+                    max_tokens=150
+                )
+            )
+
+            result = (
+                response
+                .choices[0]
+                .message
+                .content
+                .strip()
+            )
+
+            if result:
+
+                return result
+
+        except Exception as e:
+
+            error = str(e).lower()
+
+            if (
+                "404" in error
+                or "model_not_found" in error
+                or "does not exist" in error
+            ):
+
+                continue
+
+            break
+
+    # Safe fallback
+    return latest_question.strip()
+
+
+# ============================================================
+# COMPATIBILITY FUNCTION
+# ============================================================
+
+def condense_question(
+    chat_history,
+    latest_question,
+    model_name=DEFAULT_GROQ_MODEL
+):
+
+    return rewrite_query(
+        latest_question=latest_question,
+        chat_history=chat_history,
+        model=model_name
+    )

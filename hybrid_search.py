@@ -1,99 +1,178 @@
-# =============================================================================
-# Module: Hybrid Search (BM25 + Dense ChromaDB Retrieval)
-# Role: Merges keyword matching with semantic vector search for higher recall.
-# =============================================================================
+# ============================================================
+# hybrid_search.py
+# Lightweight Hybrid Retrieval
+# Vector Retrieval + Keyword Matching
+# ============================================================
 
-from typing import List, Dict, Any
-from rank_bm25 import BM25Okapi
-
-def compute_rrf_scores(
-    vector_results: List[Dict[str, Any]], 
-    bm25_results: List[Dict[str, Any]], 
-    k: int = 60
-) -> List[Dict[str, Any]]:
-    """
-    Combines two ranked lists using Reciprocal Rank Fusion (RRF).
-    RRF Score = sum(1 / (k + rank_i))
-    """
-    scores = {}
-    doc_map = {}
-
-    # Helper to process candidate list
-    def add_rankings(items):
-        for rank, item in enumerate(items):
-            doc_id = item["id"]
-            if doc_id not in scores:
-                scores[doc_id] = 0.0
-                doc_map[doc_id] = item
-            scores[doc_id] += 1.0 / (k + (rank + 1))
-
-    add_rankings(vector_results)
-    add_rankings(bm25_results)
-
-    # Sort merged documents by fused RRF score
-    sorted_doc_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
-    return [doc_map[doc_id] for doc_id in sorted_doc_ids]
+import re
+from collections import defaultdict
 
 
-class BM25Retriever:
-    def __init__(self, documents: List[str], metadatas: List[Dict[str, Any]], ids: List[str]):
-        """Builds an in-memory BM25 index over vector store document chunks."""
-        self.documents = documents
-        self.metadatas = metadatas
-        self.ids = ids
-        
-        # Tokenize documents for BM25
-        tokenized_corpus = [doc.lower().split(" ") for doc in documents]
-        self.bm25 = BM25Okapi(tokenized_corpus) if tokenized_corpus else None
+# ============================================================
+# TOKENIZER
+# ============================================================
 
-    def search(self, query: str, top_k: int = 6) -> List[Dict[str, Any]]:
-        """Performs sparse keyword matching."""
-        if not self.bm25:
-            return []
-        
-        tokenized_query = query.lower().split(" ")
-        scores = self.bm25.get_scores(tokenized_query)
-        
-        # Zip scores with documents
-        ranked = sorted(
-            zip(scores, self.documents, self.metadatas, self.ids), 
-            key=lambda x: x[0], 
-            reverse=True
-        )[:top_k]
+def tokenize(text):
 
-        return [
-            {"document": doc, "metadata": meta, "id": doc_id} 
-            for score, doc, meta, doc_id in ranked if score > 0
-        ]
+    if not text:
+        return []
 
+    return re.findall(
+        r"\b[a-zA-Z0-9]+\b",
+        text.lower()
+    )
+
+
+# ============================================================
+# KEYWORD SCORE
+# ============================================================
+
+def keyword_score(
+    query,
+    document
+):
+
+    query_tokens = set(
+        tokenize(query)
+    )
+
+    document_tokens = set(
+        tokenize(document)
+    )
+
+    if not query_tokens:
+
+        return 0.0
+
+    intersection = (
+        query_tokens &
+        document_tokens
+    )
+
+    return (
+        len(intersection) /
+        len(query_tokens)
+    )
+
+
+# ============================================================
+# HYBRID RETRIEVE
+# ============================================================
 
 def hybrid_retrieve(
-    query: str, 
-    vector_docs: List[str], 
-    vector_metas: List[Dict[str, Any]], 
-    vector_ids: List[str],
-    all_collection_docs: List[str],
-    all_collection_metas: List[Dict[str, Any]],
-    all_collection_ids: List[str],
-    top_k: int = 6
-) -> tuple[List[str], List[Dict[str, Any]]]:
-    """
-    Executes hybrid search combining dense vectors and sparse BM25.
-    """
-    # 1. Format dense results
-    dense_candidates = [
-        {"document": d, "metadata": m, "id": i} 
-        for d, m, i in zip(vector_docs, vector_metas, vector_ids)
+    query,
+    vector_docs,
+    vector_metas,
+    vector_ids,
+    all_collection_docs,
+    all_collection_metas,
+    all_collection_ids,
+    top_k=6
+):
+
+    # --------------------------------------------------------
+    # Create lookup for vector results
+    # --------------------------------------------------------
+
+    vector_scores = {}
+
+    for rank, doc_id in enumerate(
+        vector_ids
+    ):
+
+        if doc_id:
+
+            vector_scores[doc_id] = (
+                1.0 / (rank + 1)
+            )
+
+    # --------------------------------------------------------
+    # Score every document
+    # --------------------------------------------------------
+
+    candidates = []
+
+    for i, document in enumerate(
+        all_collection_docs
+    ):
+
+        if not document:
+            continue
+
+        metadata = (
+            all_collection_metas[i]
+            if i < len(all_collection_metas)
+            else {}
+        )
+
+        doc_id = (
+            all_collection_ids[i]
+            if i < len(all_collection_ids)
+            else str(i)
+        )
+
+        vector_score = vector_scores.get(
+            doc_id,
+            0.0
+        )
+
+        keyword = keyword_score(
+            query,
+            document
+        )
+
+        # ----------------------------------------------------
+        # Hybrid score
+        # ----------------------------------------------------
+
+        score = (
+            0.65 * vector_score
+            +
+            0.35 * keyword
+        )
+
+        candidates.append(
+            (
+                score,
+                document,
+                metadata,
+                doc_id
+            )
+        )
+
+    # --------------------------------------------------------
+    # Sort
+    # --------------------------------------------------------
+
+    candidates.sort(
+        key=lambda x: x[0],
+        reverse=True
+    )
+
+    selected = candidates[
+        :min(
+            int(top_k),
+            len(candidates)
+        )
     ]
 
-    # 2. Perform BM25 sparse search across corpus
-    bm25_retriever = BM25Retriever(all_collection_docs, all_collection_metas, all_collection_ids)
-    sparse_candidates = bm25_retriever.search(query, top_k=top_k)
+    documents = [
+        item[1]
+        for item in selected
+    ]
 
-    # 3. Fuse scores with RRF
-    fused_candidates = compute_rrf_scores(dense_candidates, sparse_candidates)[:top_k]
+    metadatas = [
+        item[2]
+        for item in selected
+    ]
 
-    fused_docs = [item["document"] for item in fused_candidates]
-    fused_metas = [item["metadata"] for item in fused_candidates]
+    ids = [
+        item[3]
+        for item in selected
+    ]
 
-    return fused_docs, fused_metas
+    return (
+        documents,
+        metadatas,
+        ids
+    )

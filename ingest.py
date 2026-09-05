@@ -1,6 +1,14 @@
+# ============================================================
+# AETHERAI - PDF INGESTION
+# ============================================================
+
 import os
-import fitz
+import glob
+import hashlib
+from pathlib import Path
+
 import chromadb
+from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 
 
@@ -8,329 +16,499 @@ from sentence_transformers import SentenceTransformer
 # CONFIGURATION
 # ============================================================
 
-DOCUMENTS_DIR = "data_ml/documents"
-CHROMA_DIR = "data_ml/chroma_db"
-COLLECTION_NAME = "knowledge_base"
+CHROMA_PATH = "./chroma_db"
 
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+COLLECTION_NAME = "aether_knowledge_base"
 
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 
-# ============================================================
-# CREATE DIRECTORIES
-# ============================================================
+DOCUMENTS_DIR = "./data_ml/documents"
 
-os.makedirs(DOCUMENTS_DIR, exist_ok=True)
-os.makedirs(CHROMA_DIR, exist_ok=True)
+CHUNK_SIZE = 800
+CHUNK_OVERLAP = 120
 
 
 # ============================================================
-# LOAD EMBEDDING MODEL
+# DIRECTORY
 # ============================================================
 
-print("Loading embedding model...")
-
-embedding_model = SentenceTransformer(
-    EMBEDDING_MODEL
+Path(CHROMA_PATH).mkdir(
+    parents=True,
+    exist_ok=True
 )
 
-print("Embedding model loaded successfully.")
-
-
-# ============================================================
-# CHROMADB
-# ============================================================
-
-client = chromadb.PersistentClient(
-    path=CHROMA_DIR
-)
-
-collection = client.get_or_create_collection(
-    name=COLLECTION_NAME
+Path(DOCUMENTS_DIR).mkdir(
+    parents=True,
+    exist_ok=True
 )
 
 
 # ============================================================
-# TEXT CHUNKING
+# CHROMA CLIENT
 # ============================================================
 
-def split_text(
+def get_chroma_client():
+
+    return chromadb.PersistentClient(
+        path=CHROMA_PATH
+    )
+
+
+def get_collection():
+
+    client = get_chroma_client()
+
+    collection = client.get_or_create_collection(
+        name=COLLECTION_NAME,
+        metadata={
+            "hnsw:space": "cosine"
+        }
+    )
+
+    return collection
+
+
+# ============================================================
+# EMBEDDING MODEL
+# ============================================================
+
+_model = None
+
+
+def get_embedding_model():
+
+    global _model
+
+    if _model is None:
+
+        print(
+            "\nLoading embedding model..."
+        )
+
+        _model = SentenceTransformer(
+            EMBEDDING_MODEL_NAME
+        )
+
+        print(
+            "Embedding model loaded."
+        )
+
+    return _model
+
+
+# ============================================================
+# TEXT CLEANING
+# ============================================================
+
+def clean_text(text):
+
+    if not text:
+
+        return ""
+
+    return " ".join(
+        text.split()
+    ).strip()
+
+
+# ============================================================
+# CHUNKING
+# ============================================================
+
+def create_chunks(
     text,
-    chunk_size=500,
-    overlap=100
+    chunk_size=CHUNK_SIZE,
+    overlap=CHUNK_OVERLAP
 ):
 
-    words = text.split()
+    text = clean_text(
+        text
+    )
+
+    if not text:
+
+        return []
 
     chunks = []
 
     start = 0
 
-    while start < len(words):
+    while start < len(text):
 
-        end = start + chunk_size
+        end = min(
+            start + chunk_size,
+            len(text)
+        )
 
-        chunk = " ".join(
-            words[start:end]
-        ).strip()
+        chunk = text[
+            start:end
+        ].strip()
 
         if chunk:
 
-            chunks.append(chunk)
+            chunks.append(
+                chunk
+            )
 
-        start += chunk_size - overlap
+        if end >= len(text):
+
+            break
+
+        start = end - overlap
 
     return chunks
 
 
 # ============================================================
-# PROCESS ONE PDF
+# READ PDF
 # ============================================================
 
-def process_pdf(pdf_path):
-
-    print("\n" + "=" * 60)
+def extract_pdf_pages(
+    pdf_path
+):
 
     print(
-        f"Processing: {os.path.basename(pdf_path)}"
+        f"\nReading PDF: {pdf_path}"
     )
 
-    print("=" * 60)
+    reader = PdfReader(
+        pdf_path
+    )
 
+    print(
+        f"Pages found: {len(reader.pages)}"
+    )
 
-    document = fitz.open(pdf_path)
-
-    all_chunks = []
-    all_metadata = []
-    all_ids = []
-
-
-    # --------------------------------------------------------
-    # PROCESS EACH PAGE
-    # --------------------------------------------------------
+    pages = []
 
     for page_number, page in enumerate(
-        document,
+        reader.pages,
         start=1
     ):
 
-        text = page.get_text()
+        try:
 
-        if not text.strip():
+            text = page.extract_text()
+
+        except Exception as e:
 
             print(
-                f"Page {page_number}: No text found."
+                f"Page {page_number} error: {e}"
             )
 
-            continue
+            text = ""
 
-
-        chunks = split_text(text)
-
-
-        print(
-            f"Page {page_number}: "
-            f"{len(chunks)} chunks"
+        text = clean_text(
+            text
         )
 
+        if text:
 
-        for chunk_number, chunk in enumerate(
-            chunks,
-            start=1
-        ):
-
-            chunk_id = (
-                f"{os.path.basename(pdf_path)}"
-                f"_page_{page_number}"
-                f"_chunk_{chunk_number}"
-            )
-
-
-            # Make ID safe
-            chunk_id = (
-                chunk_id
-                .replace(" ", "_")
-                .replace("/", "_")
-                .replace("\\", "_")
-            )
-
-
-            all_chunks.append(chunk)
-
-
-            all_metadata.append(
+            pages.append(
                 {
-                    "source": os.path.basename(
-                        pdf_path
-                    ),
                     "page": page_number,
-                    "chunk": chunk_number
+                    "text": text
                 }
             )
 
-
-            all_ids.append(chunk_id)
-
-
-    document.close()
+    return pages
 
 
-    # --------------------------------------------------------
-    # CHECK CONTENT
-    # --------------------------------------------------------
+# ============================================================
+# INDEX ONE PDF
+# ============================================================
 
-    if not all_chunks:
+def index_pdf(
+    pdf_path
+):
 
-        print(
-            "\n❌ No readable text found in this PDF."
-        )
-
-        return
-
-
-    print(
-        f"\nTotal chunks created: "
-        f"{len(all_chunks)}"
+    pdf_path = str(
+        pdf_path
     )
 
+    if not os.path.exists(
+        pdf_path
+    ):
+
+        raise FileNotFoundError(
+            f"PDF not found: {pdf_path}"
+        )
+
+    print(
+        "\n" + "=" * 60
+    )
+
+    print(
+        "INDEXING PDF"
+    )
+
+    print(
+        "=" * 60
+    )
 
     # --------------------------------------------------------
-    # CREATE EMBEDDINGS
+    # Read PDF
     # --------------------------------------------------------
+
+    pages = extract_pdf_pages(
+        pdf_path
+    )
+
+    if not pages:
+
+        raise ValueError(
+            "No readable text was extracted from this PDF."
+        )
+
+    # --------------------------------------------------------
+    # Prepare chunks
+    # --------------------------------------------------------
+
+    documents = []
+
+    metadatas = []
+
+    ids = []
+
+    file_name = Path(
+        pdf_path
+    ).name
+
+    file_hash = hashlib.md5(
+        Path(pdf_path).read_bytes()
+    ).hexdigest()[:12]
+
+    chunk_number = 0
+
+    for page_data in pages:
+
+        page_number = page_data[
+            "page"
+        ]
+
+        page_text = page_data[
+            "text"
+        ]
+
+        chunks = create_chunks(
+            page_text
+        )
+
+        for chunk in chunks:
+
+            chunk_id = (
+                f"{file_hash}_"
+                f"page_{page_number}_"
+                f"chunk_{chunk_number}"
+            )
+
+            documents.append(
+                chunk
+            )
+
+            metadatas.append(
+                {
+                    "source": file_name,
+                    "page": page_number,
+                    "chunk": chunk_number,
+                    "file_hash": file_hash
+                }
+            )
+
+            ids.append(
+                chunk_id
+            )
+
+            chunk_number += 1
+
+    print(
+        f"Chunks created: {len(documents)}"
+    )
+
+    if not documents:
+
+        raise ValueError(
+            "PDF was read but zero chunks were created."
+        )
+
+    # --------------------------------------------------------
+    # Embeddings
+    # --------------------------------------------------------
+
+    model = get_embedding_model()
 
     print(
         "\nCreating embeddings..."
     )
 
-
-    embeddings = embedding_model.encode(
-        all_chunks,
+    embeddings = model.encode(
+        documents,
+        normalize_embeddings=True,
         show_progress_bar=True
     ).tolist()
 
-
     print(
-        "Embeddings created successfully."
+        f"Embeddings created: {len(embeddings)}"
     )
 
+    # --------------------------------------------------------
+    # ChromaDB
+    # --------------------------------------------------------
+
+    collection = get_collection()
+
+    before_count = collection.count()
+
+    print(
+        f"\nChromaDB before indexing: {before_count}"
+    )
 
     # --------------------------------------------------------
-    # STORE IN CHROMADB
+    # Insert
     # --------------------------------------------------------
 
     print(
-        "\nStoring chunks in ChromaDB..."
+        "Inserting chunks into ChromaDB..."
     )
-
 
     collection.upsert(
-        ids=all_ids,
-        documents=all_chunks,
-        embeddings=embeddings,
-        metadatas=all_metadata
+        ids=ids,
+        documents=documents,
+        metadatas=metadatas,
+        embeddings=embeddings
     )
 
+    # --------------------------------------------------------
+    # Verify
+    # --------------------------------------------------------
+
+    after_count = collection.count()
 
     print(
-        "\n✅ PDF successfully indexed."
+        f"ChromaDB after indexing: {after_count}"
     )
 
+    if after_count <= 0:
 
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    print(
-        "\n🚀 Starting PDF ingestion..."
-    )
-
-
-    pdf_files = [
-        file
-        for file in os.listdir(
-            DOCUMENTS_DIR
+        raise RuntimeError(
+            "Indexing finished but ChromaDB still contains 0 chunks."
         )
-        if file.lower().endswith(".pdf")
-    ]
 
+    print(
+        "\nSUCCESS!"
+    )
+
+    return {
+        "file": file_name,
+        "chunks_added": len(documents),
+        "total_chunks": after_count
+    }
+
+
+# ============================================================
+# INDEX ALL PDFs IN DATA DIRECTORY
+# ============================================================
+
+def index_all_pdfs():
+
+    pdf_files = glob.glob(
+        os.path.join(
+            DOCUMENTS_DIR,
+            "*.pdf"
+        )
+    )
 
     if not pdf_files:
 
         print(
-            "\n❌ No PDF files found in:"
+            "\nNo PDF files found in:"
         )
 
         print(
             DOCUMENTS_DIR
         )
 
-        return
+        return []
 
-
-    print(
-        f"\nFound {len(pdf_files)} PDF(s):"
-    )
-
+    results = []
 
     for pdf_file in pdf_files:
-
-        print(
-            f"📄 {pdf_file}"
-        )
-
-
-    # --------------------------------------------------------
-    # PROCESS PDFs
-    # --------------------------------------------------------
-
-    for pdf_file in pdf_files:
-
-        pdf_path = os.path.join(
-            DOCUMENTS_DIR,
-            pdf_file
-        )
-
 
         try:
 
-            process_pdf(
-                pdf_path
+            result = index_pdf(
+                pdf_file
+            )
+
+            results.append(
+                result
             )
 
         except Exception as e:
 
             print(
-                f"\n❌ Error processing "
-                f"{pdf_file}:"
+                f"\nFAILED: {pdf_file}"
             )
 
-            print(e)
+            print(
+                str(e)
+            )
 
-
-    # --------------------------------------------------------
-    # FINAL COUNT
-    # --------------------------------------------------------
-
-    print("\n" + "=" * 60)
-
-    print(
-        "🎉 INGESTION COMPLETED"
-    )
-
-    print("=" * 60)
-
-
-    print(
-        f"Total chunks in ChromaDB: "
-        f"{collection.count()}"
-    )
+    return results
 
 
 # ============================================================
-# RUN
+# COMMAND LINE
 # ============================================================
 
 if __name__ == "__main__":
 
-    main()
+    print(
+        "\nAetherAI PDF Ingestion"
+    )
+
+    print(
+        f"Documents folder: {DOCUMENTS_DIR}"
+    )
+
+    print(
+        f"ChromaDB: {CHROMA_PATH}"
+    )
+
+    results = index_all_pdfs()
+
+    print(
+        "\n" + "=" * 60
+    )
+
+    print(
+        "FINAL RESULT"
+    )
+
+    print(
+        "=" * 60
+    )
+
+    if results:
+
+        for result in results:
+
+            print(
+                f"\n{result['file']}"
+            )
+
+            print(
+                f"Chunks added: "
+                f"{result['chunks_added']}"
+            )
+
+            print(
+                f"Total ChromaDB chunks: "
+                f"{result['total_chunks']}"
+            )
+
+    else:
+
+        print(
+            "No files were indexed."
+        )

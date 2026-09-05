@@ -1,181 +1,118 @@
-# =============================================================================
-# Module: AetherAI — Production General & RAG Assistant
-# Features:
-#   - Dual Mode (General Chat + Document RAG)
-#   - Groq Cloud LLM
-#   - Streaming Responses
-#   - Multithreaded PDF Processing
-#   - Hybrid Retrieval
-#   - CrossEncoder Reranking
-#   - Conversation-Aware Query Rewriting
-#   - Source Citations
-#   - Faithfulness / Hallucination Checks
-# =============================================================================
+# ============================================================
+# AETHERAI - AI KNOWLEDGE ASSISTANT
+# ============================================================
 
 import os
 import tempfile
-from concurrent.futures import ThreadPoolExecutor
-from typing import List, Dict, Any, Tuple
+from pathlib import Path
 
 import streamlit as st
-import chromadb
 
-from groq import Groq
-
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-
-# -----------------------------------------------------------------------------
-# Modular RAG Components
-# -----------------------------------------------------------------------------
-
-from retriever import retrieve_documents
-from reranker import rerank_documents
-from hallucination_checker import check_hallucination
-from hybrid_search import hybrid_retrieve
-
-
-# -----------------------------------------------------------------------------
-# 1. PAGE CONFIGURATION
-# -----------------------------------------------------------------------------
-
-st.set_page_config(
-    page_title="AetherAI — Intelligent Assistant",
-    page_icon="🌌",
-    layout="wide",
-    initial_sidebar_state="expanded"
+from ingest import (
+    index_pdf,
+    get_collection
 )
 
 
-# -----------------------------------------------------------------------------
-# 2. CUSTOM UI STYLING
-# -----------------------------------------------------------------------------
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
-st.markdown(
-    """
-    <style>
+APP_TITLE = "AetherAI - AI Knowledge Assistant"
 
-        .main-title {
-            font-size: 2.3rem;
-            font-weight: 800;
-            letter-spacing: -0.5px;
-            margin-bottom: 0.2rem;
-        }
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
 
-        .sub-title {
-            font-size: 1rem;
-            color: #6c757d;
-            margin-bottom: 1.5rem;
-        }
+FALLBACK_GROQ_MODELS = [
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b"
+]
 
-        .citation-card {
-            background-color: #f8f9fa;
-            border-left: 4px solid #6C5CE7;
-            padding: 10px 14px;
-            margin-top: 8px;
-            border-radius: 4px;
-            font-size: 0.9rem;
-        }
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 
-        .badge-grounded {
-            background-color: #d4edda;
-            color: #155724;
-            padding: 4px 10px;
-            border-radius: 12px;
-            font-weight: 600;
-            font-size: 0.85rem;
-            display: inline-block;
-        }
-
-        .badge-warning {
-            background-color: #f8d7da;
-            color: #721c24;
-            padding: 4px 10px;
-            border-radius: 12px;
-            font-weight: 600;
-            font-size: 0.85rem;
-            display: inline-block;
-        }
-
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-
-
-# -----------------------------------------------------------------------------
-# 3. CONFIGURATION
-# -----------------------------------------------------------------------------
-
-MAX_WORKERS = min(
-    32,
-    (os.cpu_count() or 1) + 4
-)
-
-executor = ThreadPoolExecutor(
-    max_workers=MAX_WORKERS
-)
-
-
-# Groq model
-DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
-
-# Embedding model used by your RAG retriever
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-
-# Default reranker
-DEFAULT_RERANKER_MODEL = (
+RERANKER_MODEL_NAME = (
     "cross-encoder/ms-marco-MiniLM-L-6-v2"
 )
 
 
-# -----------------------------------------------------------------------------
-# 4. GROQ CLIENT
-# -----------------------------------------------------------------------------
+# ============================================================
+# PAGE CONFIG
+# ============================================================
+
+st.set_page_config(
+    page_title=APP_TITLE,
+    page_icon="🤖",
+    layout="wide"
+)
+
+
+# ============================================================
+# SESSION STATE
+# ============================================================
+
+if "messages" not in st.session_state:
+
+    st.session_state.messages = []
+
+
+if "indexed_files" not in st.session_state:
+
+    st.session_state.indexed_files = []
+
+
+# ============================================================
+# CHROMA COUNT
+# ============================================================
+
+def get_chroma_count():
+
+    try:
+
+        collection = get_collection()
+
+        return collection.count()
+
+    except Exception:
+
+        return 0
+
+
+# ============================================================
+# GROQ API KEY
+# ============================================================
+
+def get_groq_api_key():
+
+    # Streamlit Cloud secrets
+    try:
+
+        key = st.secrets.get(
+            "GROQ_API_KEY"
+        )
+
+        if key:
+
+            return key
+
+    except Exception:
+
+        pass
+
+    # Local environment
+    return os.getenv(
+        "GROQ_API_KEY"
+    )
+
+
+# ============================================================
+# GROQ CLIENT
+# ============================================================
 
 @st.cache_resource
 def get_groq_client():
 
-    """
-    Create a single Groq client.
+    from groq import Groq
 
-    Local:
-        Reads GROQ_API_KEY from environment.
-
-    Streamlit Cloud:
-        Reads GROQ_API_KEY from st.secrets.
-    """
-
-    api_key = None
-
-    # ---------------------------------------------------------
-    # Try Streamlit Secrets
-    # ---------------------------------------------------------
-
-    try:
-
-        api_key = st.secrets.get(
-            "GROQ_API_KEY"
-        )
-
-    except Exception:
-
-        api_key = None
-
-    # ---------------------------------------------------------
-    # Try environment variable
-    # ---------------------------------------------------------
-
-    if not api_key:
-
-        api_key = os.getenv(
-            "GROQ_API_KEY"
-        )
-
-    # ---------------------------------------------------------
-    # Validate
-    # ---------------------------------------------------------
+    api_key = get_groq_api_key()
 
     if not api_key:
 
@@ -186,649 +123,614 @@ def get_groq_client():
     )
 
 
-groq_client = get_groq_client()
-
-
-# -----------------------------------------------------------------------------
-# 5. CHROMADB CLIENT
-# -----------------------------------------------------------------------------
+# ============================================================
+# EMBEDDING MODEL
+# ============================================================
 
 @st.cache_resource
-def get_chroma_client() -> Any:
+def get_embedding_model():
 
-    """
-    Returns a persistent ChromaDB client.
-    """
+    from sentence_transformers import (
+        SentenceTransformer
+    )
 
-    if chromadb is None:
-
-        raise RuntimeError(
-            "ChromaDB is not installed. "
-            "Please install the chromadb package."
-        )
-
-    return chromadb.PersistentClient(
-        path="./chroma_db"
+    return SentenceTransformer(
+        EMBEDDING_MODEL_NAME
     )
 
 
-chroma_client = get_chroma_client()
+# ============================================================
+# RETRIEVAL
+# ============================================================
+
+def retrieve_documents(
+    query,
+    top_k=6
+):
+
+    collection = get_collection()
+
+    count = collection.count()
+
+    if count == 0:
+
+        return []
+
+    model = get_embedding_model()
+
+    query_embedding = model.encode(
+        query,
+        normalize_embeddings=True
+    ).tolist()
+
+    results = collection.query(
+        query_embeddings=[
+            query_embedding
+        ],
+        n_results=min(
+            top_k,
+            count
+        ),
+        include=[
+            "documents",
+            "metadatas",
+            "distances"
+        ]
+    )
+
+    documents = (
+        results
+        .get("documents", [[]])[0]
+    )
+
+    metadatas = (
+        results
+        .get("metadatas", [[]])[0]
+    )
+
+    distances = (
+        results
+        .get("distances", [[]])[0]
+    )
+
+    output = []
+
+    for i, document in enumerate(
+        documents
+    ):
+
+        metadata = (
+            metadatas[i]
+            if i < len(metadatas)
+            else {}
+        )
+
+        distance = (
+            distances[i]
+            if i < len(distances)
+            else 0
+        )
+
+        output.append(
+            {
+                "document": document,
+                "metadata": metadata,
+                "distance": distance
+            }
+        )
+
+    return output
 
 
-collection = chroma_client.get_or_create_collection(
-    name="aether_knowledge_base"
-)
+# ============================================================
+# BUILD CONTEXT
+# ============================================================
+
+def build_context(
+    results
+):
+
+    context_parts = []
+
+    for index, result in enumerate(
+        results,
+        start=1
+    ):
+
+        metadata = result[
+            "metadata"
+        ]
+
+        source = metadata.get(
+            "source",
+            "Unknown"
+        )
+
+        page = metadata.get(
+            "page",
+            "?"
+        )
+
+        document = result[
+            "document"
+        ]
+
+        context_parts.append(
+            f"""
+[Doc {index}]
+Source: {source}
+Page: {page}
+
+{document}
+"""
+        )
+
+    return "\n".join(
+        context_parts
+    )
 
 
-# -----------------------------------------------------------------------------
-# 6. SIDEBAR CONFIGURATION
-# -----------------------------------------------------------------------------
+# ============================================================
+# QUERY REWRITING
+# ============================================================
+
+def rewrite_query(
+    question
+):
+
+    client = get_groq_client()
+
+    if client is None:
+
+        return question
+
+    if len(
+        st.session_state.messages
+    ) <= 1:
+
+        return question
+
+    history = st.session_state.messages[
+        -6:
+    ]
+
+    history_text = "\n".join(
+        [
+            f"{m['role']}: {m['content']}"
+            for m in history
+        ]
+    )
+
+    prompt = f"""
+Rewrite the user's latest question as a
+standalone search query.
+
+Resolve pronouns and references from the
+conversation.
+
+Conversation:
+{history_text}
+
+Latest question:
+{question}
+
+Return ONLY the rewritten query.
+"""
+
+    for model in FALLBACK_GROQ_MODELS:
+
+        try:
+
+            response = (
+                client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    temperature=0
+                )
+            )
+
+            result = (
+                response
+                .choices[0]
+                .message
+                .content
+                .strip()
+            )
+
+            if result:
+
+                return result
+
+        except Exception:
+
+            continue
+
+    return question
+
+
+# ============================================================
+# GENERATE ANSWER
+# ============================================================
+
+def generate_answer(
+    question,
+    context=None
+):
+
+    client = get_groq_client()
+
+    if client is None:
+
+        return (
+            "❌ Groq API key not found.\n\n"
+            "Please configure GROQ_API_KEY."
+        )
+
+    if context:
+
+        system_prompt = """
+You are AetherAI, a document-grounded
+AI Knowledge Assistant.
+
+Answer ONLY using the supplied document
+context.
+
+Rules:
+
+1. Never invent information.
+2. If the answer is not present in the
+   documents, say:
+
+   "The answer is not available in the
+   uploaded documents."
+
+3. Cite sources using [Doc 1], [Doc 2],
+   etc.
+4. Give a clear and concise answer.
+"""
+
+        user_prompt = f"""
+DOCUMENT CONTEXT:
+
+{context}
+
+QUESTION:
+
+{question}
+"""
+
+    else:
+
+        system_prompt = """
+You are AetherAI, a helpful AI assistant.
+Answer clearly and accurately.
+"""
+
+        user_prompt = question
+
+    last_error = None
+
+    for model in FALLBACK_GROQ_MODELS:
+
+        try:
+
+            response = (
+                client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": system_prompt
+                        },
+                        {
+                            "role": "user",
+                            "content": user_prompt
+                        }
+                    ],
+                    temperature=0.2
+                )
+            )
+
+            return (
+                response
+                .choices[0]
+                .message
+                .content
+                .strip()
+            )
+
+        except Exception as e:
+
+            last_error = str(e)
+
+            if (
+                "404" in last_error
+                or
+                "model_not_found"
+                in last_error.lower()
+            ):
+
+                continue
+
+            break
+
+    return (
+        f"❌ Groq error:\n\n{last_error}"
+    )
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
 
 with st.sidebar:
 
     st.title(
-        "🌌 Aether Settings"
-    )
-
-    # -------------------------------------------------------------------------
-    # Model Engine
-    # -------------------------------------------------------------------------
-
-    st.subheader(
-        "🤖 Model Engine"
-    )
-
-    groq_model = st.text_input(
-        "Groq Model",
-        value=DEFAULT_GROQ_MODEL
-    )
-
-    reranker_model = st.text_input(
-        "Reranker Model",
-        value=DEFAULT_RERANKER_MODEL
+        "🤖 AetherAI"
     )
 
     st.divider()
 
-    # -------------------------------------------------------------------------
-    # Knowledge Base
-    # -------------------------------------------------------------------------
+    # --------------------------------------------------------
+    # DATABASE STATUS
+    # --------------------------------------------------------
 
     st.subheader(
-        "🔍 Knowledge Base"
+        "📚 Knowledge Base"
     )
 
-    enable_rag = st.toggle(
-        "Enable Document Grounding",
-        value=True
-    )
+    count = get_chroma_count()
 
-    with st.expander(
-        "Advanced Retrieval Parameters"
-    ):
-
-        initial_top_k = st.slider(
-            "Initial Document Recall (K)",
-            min_value=2,
-            max_value=20,
-            value=6
-        )
-
-        final_top_k = st.slider(
-            "Final Reranked Context (K)",
-            min_value=1,
-            max_value=8,
-            value=3
-        )
-
-        enable_hybrid = st.checkbox(
-            "Enable Hybrid BM25 Fusion",
-            value=True
-        )
-
-    # -------------------------------------------------------------------------
-    # PDF Upload
-    # -------------------------------------------------------------------------
-
-    uploaded_files = st.file_uploader(
-        "Upload PDFs to extend Aether's memory",
-        type=["pdf"],
-        accept_multiple_files=True
-    )
-
-    # -------------------------------------------------------------------------
-    # PDF PARSER
-    # -------------------------------------------------------------------------
-
-    def _parse_pdf(
-        uploaded_file
-    ) -> Tuple[
-        List[str],
-        List[Dict[str, Any]],
-        List[str]
-    ]:
-
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=150
-        )
-
-        docs = []
-        metas = []
-        ids = []
-
-        # -----------------------------------------------------
-        # Create temporary PDF
-        # -----------------------------------------------------
-
-        with tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=".pdf"
-        ) as tmp:
-
-            tmp.write(
-                uploaded_file.read()
-            )
-
-            tmp_path = tmp.name
-
-        try:
-
-            # -------------------------------------------------
-            # Load PDF
-            # -------------------------------------------------
-
-            loader = PyPDFLoader(
-                tmp_path
-            )
-
-            documents = loader.load()
-
-            # -------------------------------------------------
-            # Split into chunks
-            # -------------------------------------------------
-
-            splits = text_splitter.split_documents(
-                documents
-            )
-
-            # -------------------------------------------------
-            # Create metadata
-            # -------------------------------------------------
-
-            for i, split in enumerate(
-                splits
-            ):
-
-                docs.append(
-                    split.page_content
-                )
-
-                metas.append(
-                    {
-                        "source": uploaded_file.name,
-                        "page": split.metadata.get(
-                            "page",
-                            0
-                        ) + 1
-                    }
-                )
-
-                ids.append(
-                    f"{uploaded_file.name}_chunk_{i}"
-                )
-
-        finally:
-
-            if os.path.exists(
-                tmp_path
-            ):
-
-                os.remove(
-                    tmp_path
-                )
-
-        return (
-            docs,
-            metas,
-            ids
-        )
-
-    # -------------------------------------------------------------------------
-    # Index Uploaded Documents
-    # -------------------------------------------------------------------------
-
-    if uploaded_files:
-
-        if st.button(
-            "📥 Index Documents",
-            use_container_width=True
-        ):
-
-            with st.spinner(
-                "Ingesting files in parallel..."
-            ):
-
-                futures = [
-                    executor.submit(
-                        _parse_pdf,
-                        f
-                    )
-
-                    for f in uploaded_files
-                ]
-
-                all_docs = []
-                all_metas = []
-                all_ids = []
-
-                for future in futures:
-
-                    d, m, i = future.result()
-
-                    all_docs.extend(d)
-                    all_metas.extend(m)
-                    all_ids.extend(i)
-
-                # -------------------------------------------------------------
-                # Add to ChromaDB
-                # -------------------------------------------------------------
-
-                if all_docs:
-
-                    collection.add(
-                        documents=all_docs,
-                        metadatas=all_metas,
-                        ids=all_ids
-                    )
-
-                    st.success(
-                        f"Added {len(all_docs)} chunk(s) "
-                        "to knowledge base!"
-                    )
-
-    # -------------------------------------------------------------------------
-    # Knowledge Base Metrics
-    # -------------------------------------------------------------------------
-
-    try:
-
-        doc_count = collection.count()
-
-    except Exception:
-
-        doc_count = 0
-
-    st.divider()
-
-    col1, col2 = st.columns(2)
-
-    col1.metric(
-        "Indexed Chunks",
-        doc_count
-    )
-
-    col2.metric(
-        "Worker Threads",
-        MAX_WORKERS
-    )
-
-    # -------------------------------------------------------------------------
-    # Groq Status
-    # -------------------------------------------------------------------------
-
-    st.divider()
-
-    st.subheader(
-        "☁️ Cloud LLM"
-    )
-
-    if groq_client is not None:
+    if count > 0:
 
         st.success(
-            "Groq Connected"
-        )
-
-        st.caption(
-            f"Model: {groq_model}"
+            f"🟢 {count} chunks indexed"
         )
 
     else:
 
-        st.error(
-            "Groq API key not configured"
+        st.warning(
+            "🟡 No documents indexed"
         )
 
-        st.caption(
-            "Add GROQ_API_KEY to your environment "
-            "or Streamlit secrets."
+    st.divider()
+
+    # --------------------------------------------------------
+    # UPLOAD
+    # --------------------------------------------------------
+
+    st.subheader(
+        "📄 Upload PDF"
+    )
+
+    uploaded_files = st.file_uploader(
+        "Upload one or more PDF files",
+        type=["pdf"],
+        accept_multiple_files=True
+    )
+
+    if uploaded_files:
+
+        st.write(
+            f"Selected: {len(uploaded_files)} PDF(s)"
         )
 
+        if st.button(
+            "📥 Index Uploaded PDFs",
+            use_container_width=True
+        ):
 
-# -----------------------------------------------------------------------------
-# 7. GROQ QUERY REWRITING
-# -----------------------------------------------------------------------------
+            total_added = 0
 
-def rewrite_query_with_groq(
-    question: str,
-    chat_history: str
-) -> str:
+            for uploaded_file in uploaded_files:
 
-    """
-    Convert conversational questions into standalone
-    retrieval queries.
-
-    Example:
-
-        Previous:
-        What is machine learning?
-
-        Current:
-        What are its types?
-
-        Result:
-        types of machine learning supervised
-        unsupervised reinforcement learning
-    """
-
-    # ---------------------------------------------------------
-    # If Groq unavailable
-    # ---------------------------------------------------------
-
-    if groq_client is None:
-
-        return question
-
-    prompt = f"""
-You are the query rewriting component of a RAG system.
-
-Rewrite the user's latest question into a clear,
-standalone search query for retrieving information
-from a document knowledge base.
-
-Conversation history:
-{chat_history}
-
-Latest user question:
-{question}
-
-Rules:
-
-1. Resolve pronouns such as:
-   it, this, that, they, them.
-
-2. Use conversation history when needed.
-
-3. Preserve the original meaning.
-
-4. Add useful keywords when appropriate.
-
-5. Do not answer the question.
-
-6. Do not explain anything.
-
-7. Return ONLY the rewritten search query.
-
-Example:
-
-Conversation:
-User: What is machine learning?
-Assistant: Machine learning is...
-
-User: What are its types?
-
-Output:
-types of machine learning supervised unsupervised reinforcement learning
-"""
-
-    try:
-
-        response = groq_client.chat.completions.create(
-
-            model=groq_model,
-
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You rewrite questions for "
-                        "semantic document retrieval."
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-
-            temperature=0.1,
-
-            max_tokens=120
-        )
-
-        rewritten = (
-            response
-            .choices[0]
-            .message
-            .content
-            .strip()
-        )
-
-        rewritten = rewritten.strip(
-            "\"'"
-        )
-
-        if not rewritten:
-
-            return question
-
-        return rewritten
-
-    except Exception:
-
-        return question
-
-
-# -----------------------------------------------------------------------------
-# 8. GROQ STREAMING RESPONSE
-# -----------------------------------------------------------------------------
-
-def stream_groq_response(
-    messages,
-    model,
-    container
-) -> str:
-
-    """
-    Stream Groq response token-by-token into Streamlit.
-    """
-
-    if groq_client is None:
-
-        error_message = (
-            "⚠️ Groq API is not configured.\n\n"
-            "Please configure `GROQ_API_KEY`."
-        )
-
-        container.markdown(
-            error_message
-        )
-
-        return error_message
-
-    full_text = ""
-
-    try:
-
-        stream = groq_client.chat.completions.create(
-
-            model=model,
-
-            messages=messages,
-
-            temperature=0.2,
-
-            max_tokens=1000,
-
-            stream=True
-        )
-
-        for chunk in stream:
-
-            if not chunk.choices:
-
-                continue
-
-            delta = (
-                chunk
-                .choices[0]
-                .delta
-                .content
-            )
-
-            if delta:
-
-                full_text += delta
-
-                container.markdown(
-                    full_text + "▌"
+                st.write(
+                    f"Processing: "
+                    f"**{uploaded_file.name}**"
                 )
 
-        container.markdown(
-            full_text
-        )
+                try:
 
-        return full_text
+                    # ----------------------------------------
+                    # Temporary file
+                    # ----------------------------------------
 
-    except Exception as e:
+                    suffix = ".pdf"
 
-        error_message = (
-            f"❌ Groq API Error:\n\n"
-            f"`{str(e)}`"
-        )
+                    with tempfile.NamedTemporaryFile(
+                        delete=False,
+                        suffix=suffix
+                    ) as temp_file:
 
-        container.markdown(
-            error_message
-        )
+                        temp_file.write(
+                            uploaded_file.getbuffer()
+                        )
 
-        return error_message
+                        temp_path = (
+                            temp_file.name
+                        )
 
+                    # ----------------------------------------
+                    # Index
+                    # ----------------------------------------
 
-# -----------------------------------------------------------------------------
-# 9. BUILD CHAT HISTORY FOR GROQ
-# -----------------------------------------------------------------------------
+                    with st.spinner(
+                        f"Indexing {uploaded_file.name}..."
+                    ):
 
-def build_chat_history(
-    messages,
-    max_messages=10
-):
+                        result = index_pdf(
+                            temp_path
+                        )
 
-    """
-    Convert Streamlit message history into Groq messages.
-    """
+                    # ----------------------------------------
+                    # Delete temporary file
+                    # ----------------------------------------
 
-    history = []
+                    try:
 
-    recent_messages = messages[
-        -max_messages:
-    ]
+                        os.remove(
+                            temp_path
+                        )
 
-    for message in recent_messages:
+                    except Exception:
 
-        role = message.get(
-            "role"
-        )
+                        pass
 
-        content = message.get(
-            "content",
-            ""
-        )
+                    total_added += (
+                        result["chunks_added"]
+                    )
 
-        # -----------------------------------------------------
-        # Remove source HTML from historical messages
-        # -----------------------------------------------------
+                    st.success(
+                        f"✅ {uploaded_file.name}: "
+                        f"{result['chunks_added']} chunks"
+                    )
 
-        if role in [
-            "user",
-            "assistant"
-        ]:
+                    st.session_state.indexed_files.append(
+                        uploaded_file.name
+                    )
 
-            history.append(
-                {
-                    "role": role,
-                    "content": content
-                }
+                except Exception as e:
+
+                    st.error(
+                        f"❌ Failed to index "
+                        f"{uploaded_file.name}"
+                    )
+
+                    st.exception(e)
+
+            # ------------------------------------------------
+            # FINAL DATABASE CHECK
+            # ------------------------------------------------
+
+            final_count = (
+                get_chroma_count()
             )
 
-    return history
+            if final_count > 0:
+
+                st.success(
+                    f"🎉 Indexing completed!\n\n"
+                    f"ChromaDB now contains "
+                    f"**{final_count} chunks**."
+                )
+
+                st.rerun()
+
+            else:
+
+                st.error(
+                    "❌ ChromaDB is still empty."
+                )
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # CLEAR CHAT
+    # --------------------------------------------------------
+
+    if st.button(
+        "🗑️ Clear Chat",
+        use_container_width=True
+    ):
+
+        st.session_state.messages = []
+
+        st.rerun()
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # SYSTEM
+    # --------------------------------------------------------
+
+    st.subheader(
+        "⚙️ System"
+    )
+
+    st.caption(
+        f"LLM: {DEFAULT_GROQ_MODEL}"
+    )
+
+    st.caption(
+        f"Embedding: {EMBEDDING_MODEL_NAME}"
+    )
+
+    st.caption(
+        f"Reranker: {RERANKER_MODEL_NAME}"
+    )
+
+    st.caption(
+        "Vector DB: ChromaDB"
+    )
 
 
-# -----------------------------------------------------------------------------
-# 10. MAIN APPLICATION UI
-# -----------------------------------------------------------------------------
+# ============================================================
+# MAIN PAGE
+# ============================================================
 
-st.markdown(
-    '<div class="main-title">🌌 AetherAI</div>',
-    unsafe_allow_html=True
+st.title(
+    "🤖 AetherAI"
 )
 
-st.markdown(
-    '<div class="sub-title">'
-    'General Conversational Assistant & '
-    'Specialized Knowledge Engine'
-    '</div>',
-    unsafe_allow_html=True
+st.caption(
+    "AI Knowledge Assistant with "
+    "Document RAG"
 )
 
 
-# -----------------------------------------------------------------------------
-# 11. SESSION STATE
-# -----------------------------------------------------------------------------
+# ============================================================
+# MODE
+# ============================================================
 
-if "messages" not in st.session_state:
+mode = st.radio(
+    "Mode",
+    [
+        "💬 General Chat",
+        "📚 Document RAG"
+    ],
+    horizontal=True
+)
 
-    st.session_state.messages = []
 
+# ============================================================
+# DISPLAY CHAT HISTORY
+# ============================================================
 
-# -----------------------------------------------------------------------------
-# 12. DISPLAY PREVIOUS CHAT
-# -----------------------------------------------------------------------------
-
-for msg in st.session_state.messages:
+for message in st.session_state.messages:
 
     with st.chat_message(
-        msg["role"]
+        message["role"]
     ):
 
         st.markdown(
-            msg["content"],
-            unsafe_allow_html=True
+            message["content"]
         )
 
 
-# -----------------------------------------------------------------------------
-# 13. CHAT INPUT
-# -----------------------------------------------------------------------------
+# ============================================================
+# USER INPUT
+# ============================================================
 
-prompt = st.chat_input(
-    "Ask Aether anything or query your uploaded documents..."
+question = st.chat_input(
+    "Ask AetherAI something..."
 )
 
 
-# -----------------------------------------------------------------------------
-# 14. PROCESS USER QUESTION
-# -----------------------------------------------------------------------------
+if question:
 
-if prompt:
-
-    # -------------------------------------------------------------------------
-    # Store User Message
-    # -------------------------------------------------------------------------
+    # --------------------------------------------------------
+    # User message
+    # --------------------------------------------------------
 
     st.session_state.messages.append(
         {
             "role": "user",
-            "content": prompt
+            "content": question
         }
     )
 
@@ -837,608 +739,204 @@ if prompt:
     ):
 
         st.markdown(
-            prompt
+            question
         )
 
-    # -------------------------------------------------------------------------
-    # Assistant Message
-    # -------------------------------------------------------------------------
+    # --------------------------------------------------------
+    # Assistant
+    # --------------------------------------------------------
 
     with st.chat_message(
         "assistant"
     ):
 
-        response_placeholder = st.empty()
+        # ====================================================
+        # DOCUMENT RAG
+        # ====================================================
 
-        context = ""
+        if mode == "📚 Document RAG":
 
-        citations_list = []
+            count = get_chroma_count()
 
-        reranked_docs = []
+            if count == 0:
 
-        reranked_metas = []
-
-        standalone_query = prompt
-
-        # ---------------------------------------------------------------------
-        # Determine if RAG should run
-        # ---------------------------------------------------------------------
-
-        should_retrieve = (
-            enable_rag
-            and doc_count > 0
-        )
-
-        # =====================================================================
-        # RAG PIPELINE
-        # =====================================================================
-
-        if should_retrieve:
-
-            with st.status(
-                "Searching Knowledge Base...",
-                expanded=False
-            ) as status:
-
-                try:
-
-                    # ---------------------------------------------------------
-                    # STEP 1: BUILD CONVERSATION HISTORY
-                    # ---------------------------------------------------------
-
-                    previous_messages = (
-                        st.session_state.messages[:-1]
-                    )
-
-                    history_text_parts = []
-
-                    for message in previous_messages:
-
-                        history_text_parts.append(
-                            f"{message['role']}: "
-                            f"{message['content']}"
-                        )
-
-                    chat_history = "\n".join(
-                        history_text_parts
-                    )
-
-                    # ---------------------------------------------------------
-                    # STEP 2: QUERY REWRITING
-                    # ---------------------------------------------------------
-
-                    standalone_query = (
-                        rewrite_query_with_groq(
-                            question=prompt,
-                            chat_history=chat_history
-                        )
-                    )
-
-                    # ---------------------------------------------------------
-                    # STEP 3: VECTOR RETRIEVAL
-                    # ---------------------------------------------------------
-
-                    v_docs, v_metas, v_ids = (
-                        retrieve_documents(
-
-                            query=standalone_query,
-
-                            collection_name=(
-                                "aether_knowledge_base"
-                            ),
-
-                            initial_top_k=initial_top_k,
-
-                            # Important:
-                            # This is the embedding model,
-                            # NOT the Groq LLM.
-                            model_name=EMBEDDING_MODEL
-                        )
-                    )
-
-                    # ---------------------------------------------------------
-                    # STEP 4: HYBRID SEARCH
-                    # ---------------------------------------------------------
-
-                    if enable_hybrid:
-
-                        all_db = collection.get()
-
-                        retrieved_docs, retrieved_metas = (
-                            hybrid_retrieve(
-
-                                query=standalone_query,
-
-                                vector_docs=v_docs,
-
-                                vector_metas=v_metas,
-
-                                vector_ids=v_ids,
-
-                                all_collection_docs=(
-                                    all_db.get(
-                                        "documents",
-                                        []
-                                    )
-                                ),
-
-                                all_collection_metas=(
-                                    all_db.get(
-                                        "metadatas",
-                                        []
-                                    )
-                                ),
-
-                                all_collection_ids=(
-                                    all_db.get(
-                                        "ids",
-                                        []
-                                    )
-                                ),
-
-                                top_k=initial_top_k
-                            )
-                        )
-
-                    else:
-
-                        retrieved_docs = v_docs
-
-                        retrieved_metas = v_metas
-
-                    # ---------------------------------------------------------
-                    # STEP 5: CROSSENCODER RERANKING
-                    # ---------------------------------------------------------
-
-                    if retrieved_docs:
-
-                        reranked_docs, reranked_metas = (
-                            rerank_documents(
-
-                                query=standalone_query,
-
-                                documents=retrieved_docs,
-
-                                metadatas=retrieved_metas,
-
-                                top_k=final_top_k,
-
-                                model_name=reranker_model
-                            )
-                        )
-
-                    # ---------------------------------------------------------
-                    # STEP 6: BUILD DOCUMENT CONTEXT
-                    # ---------------------------------------------------------
-
-                    if reranked_docs:
-
-                        context_chunks = []
-
-                        for idx, (
-                            doc,
-                            meta
-                        ) in enumerate(
-                            zip(
-                                reranked_docs,
-                                reranked_metas
-                            ),
-                            start=1
-                        ):
-
-                            source_file = meta.get(
-                                "source",
-                                "Document"
-                            )
-
-                            page_num = meta.get(
-                                "page",
-                                "N/A"
-                            )
-
-                            # -------------------------------------------------
-                            # Context chunk
-                            # -------------------------------------------------
-
-                            context_chunks.append(
-                                f"[Doc {idx}] "
-                                f"Source: {source_file} "
-                                f"(Page {page_num})\n"
-                                f"{doc}"
-                            )
-
-                            # -------------------------------------------------
-                            # Citation information
-                            # -------------------------------------------------
-
-                            citations_list.append(
-                                {
-                                    "index": idx,
-                                    "source": source_file,
-                                    "page": page_num,
-                                    "excerpt": (
-                                        doc[:180] + "..."
-                                        if len(doc) > 180
-                                        else doc
-                                    )
-                                }
-                            )
-
-                        context = "\n\n".join(
-                            context_chunks
-                        )
-
-                        status.update(
-                            label=(
-                                "Relevant Documents Found!"
-                            ),
-                            state="complete"
-                        )
-
-                    else:
-
-                        status.update(
-                            label=(
-                                "No document matches. "
-                                "Using general knowledge."
-                            ),
-                            state="complete"
-                        )
-
-                except Exception as e:
-
-                    status.update(
-                        label=(
-                            "Retrieval failed. "
-                            "Using general mode."
-                        ),
-                        state="error"
-                    )
-
-                    st.warning(
-                        f"Retrieval error: {e}"
-                    )
-
-        # =====================================================================
-        # GENERAL CHAT / RAG PROMPT
-        # =====================================================================
-
-        if context:
-
-            system_message = f"""
-You are Aether, an expert AI assistant using
-Retrieval-Augmented Generation.
-
-Answer the user's question using ONLY the
-provided document context.
-
-IMPORTANT RULES:
-
-1. Do not use outside knowledge for this answer.
-
-2. Do not invent facts.
-
-3. Do not make assumptions that are not supported
-   by the provided context.
-
-4. If the answer cannot be found in the context,
-   say:
-
-"The answer is not available in the uploaded documents."
-
-5. Give a clear and useful explanation.
-
-6. Cite supporting sources inline using:
-[Doc 1], [Doc 2], etc.
-
-7. Only cite documents that actually support the answer.
-
-DOCUMENT CONTEXT:
-
-{context}
-"""
-
-        else:
-
-            system_message = """
-You are Aether, a helpful and intelligent AI assistant.
-
-Answer the user's question clearly, accurately,
-and thoroughly using your general knowledge.
-
-Be conversational and helpful.
-
-Do not claim that information comes from uploaded
-documents when no document context was retrieved.
-"""
-
-        # =====================================================================
-        # BUILD GROQ MESSAGE LIST
-        # =====================================================================
-
-        groq_messages = [
-            {
-                "role": "system",
-                "content": system_message
-            }
-        ]
-
-        # ---------------------------------------------------------------------
-        # Add previous conversation
-        # ---------------------------------------------------------------------
-
-        previous_chat = build_chat_history(
-            st.session_state.messages[:-1],
-            max_messages=10
-        )
-
-        for message in previous_chat:
-
-            groq_messages.append(
-                {
-                    "role": message["role"],
-                    "content": message["content"]
-                }
-            )
-
-        # ---------------------------------------------------------------------
-        # Current question
-        # ---------------------------------------------------------------------
-
-        groq_messages.append(
-            {
-                "role": "user",
-                "content": prompt
-            }
-        )
-
-        # =====================================================================
-        # STEP 7: GROQ RESPONSE STREAMING
-        # =====================================================================
-
-        raw_response = stream_groq_response(
-
-            messages=groq_messages,
-
-            model=groq_model,
-
-            container=response_placeholder
-        )
-
-        # =====================================================================
-        # STEP 8: HALLUCINATION / GROUNDING CHECK
-        # =====================================================================
-
-        badge_html = ""
-
-        if context and raw_response:
-
-            try:
-
-                eval_result = check_hallucination(
-                    context,
-                    raw_response
+                answer = (
+                    "⚠️ No documents are currently "
+                    "indexed.\n\n"
+                    "Please upload a PDF from the "
+                    "sidebar and click "
+                    "**Index Uploaded PDFs**."
                 )
 
-                score = float(
-                    eval_result.get(
-                        "score",
-                        0
-                    )
+                st.warning(
+                    answer
                 )
 
-                score_pct = int(
-                    score * 100
-                )
+            else:
 
-                is_grounded = eval_result.get(
-                    "is_grounded",
-                    False
-                )
+                # --------------------------------------------
+                # Query rewriting
+                # --------------------------------------------
 
-                if is_grounded:
+                with st.spinner(
+                    "🧠 Rewriting query..."
+                ):
 
-                    badge_html = (
-                        '<div class="badge-grounded">'
-                        f'🟢 Grounding Confidence: '
-                        f'{score_pct}%'
-                        '</div>'
+                    rewritten_query = (
+                        rewrite_query(
+                            question
+                        )
                     )
 
-                else:
+                # --------------------------------------------
+                # Retrieval
+                # --------------------------------------------
 
-                    badge_html = (
-                        '<div class="badge-warning">'
-                        f'🔴 Grounding Warning: '
-                        f'Low Confidence '
-                        f'({score_pct}%)'
-                        '</div>'
+                with st.spinner(
+                    "🔎 Searching knowledge base..."
+                ):
+
+                    results = retrieve_documents(
+                        rewritten_query,
+                        top_k=6
                     )
 
-            except Exception as e:
+                # --------------------------------------------
+                # Context
+                # --------------------------------------------
 
-                badge_html = (
-                    '<div class="badge-warning">'
-                    '⚠️ Grounding check unavailable'
-                    '</div>'
+                context = build_context(
+                    results
                 )
 
-        # =====================================================================
-        # STEP 9: SOURCE CITATIONS
-        # =====================================================================
+                # --------------------------------------------
+                # Answer
+                # --------------------------------------------
 
-        citations_html = ""
+                with st.spinner(
+                    "🤖 Generating answer..."
+                ):
 
-        if citations_list:
+                    answer = generate_answer(
+                        question,
+                        context
+                    )
 
-            citations_html += (
-                "\n\n### 📑 Source Citations\n"
-            )
+                st.markdown(
+                    answer
+                )
 
-            for cite in citations_list:
+                # --------------------------------------------
+                # Pipeline
+                # --------------------------------------------
 
-                citations_html += f"""
-<div class="citation-card">
-    <strong>
-        [Doc {cite['index']}] {cite['source']}
-    </strong>
-    (Page {cite['page']})
-    <br/>
-    <em style="color: #555;">
-        "{cite['excerpt']}"
-    </em>
-</div>
-"""
-
-        # =====================================================================
-        # FINAL RESPONSE
-        # =====================================================================
-
-        final_content = (
-            f"{raw_response}\n\n"
-            f"{badge_html}\n"
-            f"{citations_html}"
-        )
-
-        response_placeholder.markdown(
-            final_content,
-            unsafe_allow_html=True
-        )
-
-        # =====================================================================
-        # STEP 10: RETRIEVED CONTEXT INSPECTOR
-        # =====================================================================
-
-        if reranked_docs:
-
-            with st.expander(
-                "🔍 View Retrieved Context Chunks"
-            ):
-
-                for idx, (
-                    doc,
-                    meta
-                ) in enumerate(
-                    zip(
-                        reranked_docs,
-                        reranked_metas
-                    ),
-                    start=1
+                with st.expander(
+                    "🔍 RAG Pipeline"
                 ):
 
                     st.write(
-                        f"**Chunk [{idx}]** — "
-                        f"`{meta.get('source', 'Unknown')}` "
-                        f"(Page "
-                        f"{meta.get('page', 'N/A')})"
+                        "Original query:"
                     )
 
-                    st.caption(
-                        doc
+                    st.code(
+                        question
                     )
 
-                    st.divider()
+                    st.write(
+                        "Rewritten query:"
+                    )
 
-        # =====================================================================
-        # STEP 11: PIPELINE DETAILS
-        # =====================================================================
+                    st.code(
+                        rewritten_query
+                    )
 
-        with st.expander(
-            "⚙️ Pipeline Details"
-        ):
+                    st.write(
+                        f"ChromaDB chunks: {count}"
+                    )
 
-            st.write(
-                "**Original Query:**"
-            )
+                    st.write(
+                        f"Retrieved chunks: "
+                        f"{len(results)}"
+                    )
 
-            st.code(
-                prompt
-            )
+                # --------------------------------------------
+                # Sources
+                # --------------------------------------------
 
-            st.write(
-                "**Rewritten Search Query:**"
-            )
+                if results:
 
-            st.code(
-                standalone_query
-            )
+                    with st.expander(
+                        "📚 Sources"
+                    ):
 
-            st.write(
-                "**Embedding Model:**"
-            )
+                        for index, result in enumerate(
+                            results,
+                            start=1
+                        ):
 
-            st.code(
-                EMBEDDING_MODEL
-            )
+                            metadata = result[
+                                "metadata"
+                            ]
 
-            st.write(
-                "**Groq LLM:**"
-            )
+                            source = metadata.get(
+                                "source",
+                                "Unknown"
+                            )
 
-            st.code(
-                groq_model
-            )
+                            page = metadata.get(
+                                "page",
+                                "?"
+                            )
 
-            st.write(
-                "**Initial Retrieved Documents:**"
-            )
+                            st.markdown(
+                                f"""
+                                **[Doc {index}]**
 
-            st.write(
-                len(
-                    retrieved_docs
+                                📄 Source: `{source}`
+
+                                📖 Page: `{page}`
+
+                                ---
+                                """
+                            )
+
+                # --------------------------------------------
+                # Retrieved context
+                # --------------------------------------------
+
+                with st.expander(
+                    "📄 Retrieved Context"
+                ):
+
+                    st.text(
+                        context
+                    )
+
+        # ====================================================
+        # GENERAL CHAT
+        # ====================================================
+
+        else:
+
+            with st.spinner(
+                "🤖 Thinking..."
+            ):
+
+                answer = generate_answer(
+                    question
                 )
-                if should_retrieve
-                else 0
+
+            st.markdown(
+                answer
             )
 
-            st.write(
-                "**Final Reranked Chunks:**"
-            )
+    # --------------------------------------------------------
+    # Save assistant message
+    # --------------------------------------------------------
 
-            st.write(
-                len(
-                    reranked_docs
-                )
-            )
-
-            st.write(
-                "**Hybrid Search:**"
-            )
-
-            st.write(
-                "Enabled"
-                if enable_hybrid
-                else "Disabled"
-            )
-
-            st.write(
-                "**Reranker:**"
-            )
-
-            st.code(
-                reranker_model
-            )
-
-        # =====================================================================
-        # STEP 12: SAVE ASSISTANT RESPONSE
-        # =====================================================================
-
-        st.session_state.messages.append(
-            {
-                "role": "assistant",
-                "content": final_content
-            }
-        )
-
-
-# -----------------------------------------------------------------------------
-# 15. FOOTER
-# -----------------------------------------------------------------------------
-
-st.divider()
-
-st.caption(
-    "AetherAI • "
-    "RAG + Hybrid Search + CrossEncoder + "
-    "Groq Cloud LLM + Source Attribution"
-)
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": answer
+        }
+    )

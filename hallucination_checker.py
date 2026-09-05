@@ -1,70 +1,232 @@
-# =============================================================================
-# Module: Hallucination & Faithfulness Evaluator
-# Role: Verifies if the LLM generated response is grounded in provided context.
-# =============================================================================
+# ============================================================
+# hallucination_checker.py
+# Lightweight Groundedness Checker
+# ============================================================
 
-from sentence_transformers import CrossEncoder
+import re
 
-class HallucinationChecker:
-    def __init__(self, model_name: str = "vectara/hallucination_evaluation_model"):
-        """
-        Initializes an entailment/cross-encoder model trained to detect hallucinations.
-        Higher score = higher alignment/factual grounding with context.
-        """
-        print(f"Loading Hallucination Checking Model: {model_name}...")
-        # Fallback to standard cross-encoder if custom model isn't available
-        try:
-            self.model = CrossEncoder(model_name, max_length=512)
-        except Exception as e:
-            print(f"Failed loading {model_name} ({e}), falling back to default cross-encoder.")
-            self.model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
-    def check_faithfulness(self, context: str, response: str, threshold: float = 0.5) -> dict:
-        """
-        Evaluates the generated response against retrieved context.
-        Returns score, pass/fail status, and a warnings list.
-        """
-        if not context or not response:
-            return {
-                "score": 0.0,
-                "is_grounded": False,
-                "warning": "Empty context or response provided."
-            }
+STOPWORDS = {
+    "the",
+    "a",
+    "an",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "of",
+    "to",
+    "in",
+    "on",
+    "for",
+    "and",
+    "or",
+    "with",
+    "that",
+    "this",
+    "these",
+    "those",
+    "it",
+    "its",
+    "as",
+    "by",
+    "from",
+    "at",
+    "about",
+    "into",
+    "than",
+    "then",
+    "also",
+    "can",
+    "may",
+    "will",
+    "would",
+    "should",
+    "could",
+    "do",
+    "does",
+    "did",
+    "not"
+}
 
-        # Model predicts alignment score between context and response
-        pair = [[context, response]]
-        score = float(self.model.predict(pair)[0])
 
-        # Normalize score if model outputs unscaled logits
-        if score < 0 or score > 1:
-            import math
-            score = 1 / (1 + math.exp(-score))  # Sigmoid scaling
+# ============================================================
+# TOKENIZATION
+# ============================================================
 
-        is_grounded = score >= threshold
+def normalize_text(text):
+
+    text = text.lower()
+
+    text = re.sub(
+        r"\[doc\s*\d+\]",
+        "",
+        text
+    )
+
+    return text
+
+
+def get_keywords(text):
+
+    text = normalize_text(
+        text
+    )
+
+    words = re.findall(
+        r"\b[a-zA-Z0-9]+\b",
+        text
+    )
+
+    return {
+        word
+        for word in words
+        if word not in STOPWORDS
+        and len(word) > 2
+    }
+
+
+# ============================================================
+# SENTENCE SPLIT
+# ============================================================
+
+def split_sentences(text):
+
+    sentences = re.split(
+        r"(?<=[.!?])\s+",
+        text.strip()
+    )
+
+    return [
+        sentence.strip()
+        for sentence in sentences
+        if sentence.strip()
+    ]
+
+
+# ============================================================
+# SENTENCE GROUNDING
+# ============================================================
+
+def sentence_grounding_score(
+    sentence,
+    context
+):
+
+    sentence_words = get_keywords(
+        sentence
+    )
+
+    context_words = get_keywords(
+        context
+    )
+
+    if not sentence_words:
+
+        return 1.0
+
+    overlap = (
+        sentence_words &
+        context_words
+    )
+
+    return (
+        len(overlap) /
+        len(sentence_words)
+    )
+
+
+# ============================================================
+# HALLUCINATION CHECK
+# ============================================================
+
+def check_hallucination(
+    context,
+    answer,
+    threshold=0.35
+):
+
+    if not answer:
 
         return {
-            "score": round(score, 3),
-            "is_grounded": is_grounded,
-            "warning": None if is_grounded else "⚠️ Warning: Potential hallucination or weak context grounding detected."
+            "score": 0.0,
+            "is_grounded": False,
+            "sentence_scores": [],
+            "unsupported_sentences": [],
+            "support_ratio": 0.0
         }
 
+    if not context:
 
-# Singleton pattern for cached model reuse
-_checker_instance = None
+        return {
+            "score": 0.0,
+            "is_grounded": False,
+            "sentence_scores": [],
+            "unsupported_sentences": split_sentences(answer),
+            "support_ratio": 0.0
+        }
 
-def check_hallucination(context: str, response: str, threshold: float = 0.5) -> dict:
-    """Convenience function interface."""
-    global _checker_instance
-    if _checker_instance is None:
-        _checker_instance = HallucinationChecker()
-    return _checker_instance.check_faithfulness(context, response, threshold)
+    sentences = split_sentences(
+        answer
+    )
 
+    scores = []
 
-if __name__ == "__main__":
-    # Test Run
-    sample_context = "Machine learning is a field of study in artificial intelligence."
-    sample_answer_good = "Machine learning is a part of AI."
-    sample_answer_bad = "Machine learning was invented in France during the 18th century."
+    unsupported = []
 
-    print("Grounded Test:", check_hallucination(sample_context, sample_answer_good))
-    print("Hallucination Test:", check_hallucination(sample_context, sample_answer_bad))
+    for sentence in sentences:
+
+        score = sentence_grounding_score(
+            sentence,
+            context
+        )
+
+        scores.append(
+            score
+        )
+
+        if score < threshold:
+
+            unsupported.append(
+                sentence
+            )
+
+    if scores:
+
+        overall_score = (
+            sum(scores) /
+            len(scores)
+        )
+
+        support_ratio = (
+            sum(
+                1
+                for score in scores
+                if score >= threshold
+            )
+            /
+            len(scores)
+        )
+
+    else:
+
+        overall_score = 0.0
+
+        support_ratio = 0.0
+
+    is_grounded = (
+        overall_score >= threshold
+        and
+        support_ratio >= 0.5
+    )
+
+    return {
+        "score": overall_score,
+        "is_grounded": is_grounded,
+        "sentence_scores": scores,
+        "unsupported_sentences": unsupported,
+        "support_ratio": support_ratio
+    }

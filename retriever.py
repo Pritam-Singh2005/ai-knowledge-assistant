@@ -1,96 +1,320 @@
-# =============================================================================
-# Module: Vector Retriever with Multi-Query Rewriting
-# Role: Performs ChromaDB document retrieval with query expansion.
-# =============================================================================
+# ============================================================
+# AETHERAI - RETRIEVER
+# ============================================================
 
-import requests
 import chromadb
-from typing import List, Dict, Any, Tuple
-
-# Initialize Persistent ChromaDB Client
-chroma_client = chromadb.PersistentClient(path="./chroma_db")
+from sentence_transformers import SentenceTransformer
 
 
-def rewrite_query(query: str, model_name: str = "llama3.2:1b") -> List[str]:
-    """
-    Generates alternative search queries to improve retrieval recall.
-    """
-    prompt = f"""Generate 3 alternative search queries for retrieving relevant context based on: "{query}".
-Return ONLY the queries, one per line, without numbers or extra formatting."""
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+CHROMA_PATH = "./chroma_db"
+
+COLLECTION_NAME = "aether_knowledge_base"
+
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+
+
+# ============================================================
+# CHROMA CLIENT
+# ============================================================
+
+def get_chroma_client():
+
+    return chromadb.PersistentClient(
+        path=CHROMA_PATH
+    )
+
+
+# ============================================================
+# COLLECTION
+# ============================================================
+
+def get_collection():
+
+    client = get_chroma_client()
+
+    collection = client.get_or_create_collection(
+        name=COLLECTION_NAME,
+        metadata={
+            "hnsw:space": "cosine"
+        }
+    )
+
+    return collection
+
+
+# ============================================================
+# EMBEDDING MODEL
+# ============================================================
+
+_model = None
+
+
+def get_embedding_model():
+
+    global _model
+
+    if _model is None:
+
+        print(
+            "Loading embedding model..."
+        )
+
+        _model = SentenceTransformer(
+            EMBEDDING_MODEL_NAME
+        )
+
+        print(
+            "Embedding model loaded."
+        )
+
+    return _model
+
+
+# ============================================================
+# DATABASE COUNT
+# ============================================================
+
+def get_collection_count():
 
     try:
-        res = requests.post(
-            "http://localhost:11434/api/generate",
-            json={"model": model_name, "prompt": prompt, "stream": False},
-            timeout=10
-        )
-        if res.status_code == 200:
-            raw_lines = res.json().get("response", "").split("\n")
-            lines = [l.strip() for l in raw_lines if l.strip()]
-            # Ensure the original user query is included first
-            if query not in lines:
-                lines.insert(0, query)
-            return lines
-    except Exception as e:
-        print(f"Query rewriting skipped ({e}), defaulting to original prompt.")
-    
-    return [query]
 
+        collection = get_collection()
+
+        return collection.count()
+
+    except Exception as e:
+
+        print(
+            f"ChromaDB error: {e}"
+        )
+
+        return 0
+
+
+# ============================================================
+# RETRIEVE DOCUMENTS
+# ============================================================
 
 def retrieve_documents(
-    query: str, 
-    collection_name: str = "pdf_collection", 
-    initial_top_k: int = 6,
-    model_name: str = "llama3.2:1b"
-) -> Tuple[List[str], List[Dict[str, Any]], List[str]]:
-    """
-    Retrieves document chunks, metadata, and chunk IDs from ChromaDB.
-    Returns:
-        (documents_list, metadatas_list, ids_list)
-    """
-    try:
-        collection = chroma_client.get_collection(name=collection_name)
-    except Exception as e:
-        print(f"Warning: Could not connect to collection '{collection_name}': {e}")
-        return [], [], []
+    query,
+    top_k=6
+):
 
-    # Rewrite query into multiple variants
-    queries = rewrite_query(query, model_name)
+    collection = get_collection()
 
-    # Perform query against ChromaDB
-    try:
-        results = collection.query(
-            query_texts=queries, 
-            n_results=initial_top_k
+    count = collection.count()
+
+    print(
+        f"\nChromaDB documents: {count}"
+    )
+
+    if count == 0:
+
+        print(
+            "WARNING: ChromaDB is empty."
         )
-    except Exception as e:
-        print(f"ChromaDB Query Error: {e}")
-        return [], [], []
 
-    documents_list, metadatas_list, ids_list = [], [], []
-    seen_ids = set()
+        return {
+            "documents": [],
+            "metadatas": [],
+            "ids": [],
+            "distances": []
+        }
 
-    raw_docs = results.get("documents", [])
-    raw_metas = results.get("metadatas", [])
-    raw_ids = results.get("ids", [])
+    # --------------------------------------------------------
+    # Create query embedding
+    # --------------------------------------------------------
 
-    # Process and deduplicate chunks across rewritten query results
-    for q_idx in range(len(queries)):
-        q_docs = raw_docs[q_idx] if q_idx < len(raw_docs) else []
-        q_metas = raw_metas[q_idx] if q_idx < len(raw_metas) else [{}] * len(q_docs)
-        q_ids = raw_ids[q_idx] if q_idx < len(raw_ids) else [f"doc_{i}" for i in range(len(q_docs))]
+    model = get_embedding_model()
 
-        for doc, meta, doc_id in zip(q_docs, q_metas, q_ids):
-            if doc_id not in seen_ids:
-                seen_ids.add(doc_id)
-                documents_list.append(doc)
-                metadatas_list.append(meta or {})
-                ids_list.append(doc_id)
+    query_embedding = model.encode(
+        query,
+        normalize_embeddings=True
+    ).tolist()
 
-    return documents_list, metadatas_list, ids_list
+    # --------------------------------------------------------
+    # Search ChromaDB
+    # --------------------------------------------------------
 
+    results = collection.query(
+        query_embeddings=[
+            query_embedding
+        ],
+        n_results=min(
+            top_k,
+            count
+        ),
+        include=[
+            "documents",
+            "metadatas",
+            "distances"
+        ]
+    )
+
+    documents = results.get(
+        "documents",
+        [[]]
+    )[0]
+
+    metadatas = results.get(
+        "metadatas",
+        [[]]
+    )[0]
+
+    distances = results.get(
+        "distances",
+        [[]]
+    )[0]
+
+    ids = results.get(
+        "ids",
+        [[]]
+    )[0]
+
+    print(
+        f"Retrieved: {len(documents)} chunks"
+    )
+
+    return {
+        "documents": documents,
+        "metadatas": metadatas,
+        "ids": ids,
+        "distances": distances
+    }
+
+
+# ============================================================
+# SIMPLE SEARCH
+# ============================================================
+
+def search_documents(
+    query,
+    top_k=6
+):
+
+    result = retrieve_documents(
+        query,
+        top_k
+    )
+
+    return result["documents"]
+
+
+# ============================================================
+# GET ALL DOCUMENTS
+# ============================================================
+
+def get_all_documents():
+
+    collection = get_collection()
+
+    count = collection.count()
+
+    if count == 0:
+
+        return {
+            "documents": [],
+            "metadatas": [],
+            "ids": []
+        }
+
+    results = collection.get(
+        include=[
+            "documents",
+            "metadatas"
+        ]
+    )
+
+    return {
+        "documents": results.get(
+            "documents",
+            []
+        ),
+        "metadatas": results.get(
+            "metadatas",
+            []
+        ),
+        "ids": results.get(
+            "ids",
+            []
+        )
+    }
+
+
+# ============================================================
+# TEST
+# ============================================================
 
 if __name__ == "__main__":
-    # Test Run
-    test_docs, test_metas, test_ids = retrieve_documents("What is machine learning?")
-    print(f"Retrieved {len(test_docs)} chunks.")
+
+    print(
+        "\n" + "=" * 60
+    )
+
+    print(
+        "AetherAI Retriever Test"
+    )
+
+    print(
+        "=" * 60
+    )
+
+    count = get_collection_count()
+
+    print(
+        f"\nChromaDB path:"
+        f" {CHROMA_PATH}"
+    )
+
+    print(
+        f"Collection:"
+        f" {COLLECTION_NAME}"
+    )
+
+    print(
+        f"Embedding model:"
+        f" {EMBEDDING_MODEL_NAME}"
+    )
+
+    print(
+        f"Documents indexed:"
+        f" {count}"
+    )
+
+    if count > 0:
+
+        result = retrieve_documents(
+            "What is machine learning?",
+            top_k=3
+        )
+
+        print(
+            "\nRetrieved chunks:"
+        )
+
+        for i, doc in enumerate(
+            result["documents"],
+            start=1
+        ):
+
+            print(
+                f"\n--- Chunk {i} ---"
+            )
+
+            print(
+                doc[:500]
+            )
+
+    else:
+
+        print(
+            "\nNo documents indexed."
+        )
+
+        print(
+            "Run: python ingest.py"
+        )
