@@ -1,0 +1,24 @@
+# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# PyInstaller Build Artifacts
+build/
+dist/
+*.spec
+
+# Streamlit Secrets & Local Settings
+.streamlit/secrets.toml
+
+# Databases & Local Storage
+chroma_db/
+*.db
+*.sqlite
+
+# Environment Files
+.env

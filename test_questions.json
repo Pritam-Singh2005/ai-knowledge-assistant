@@ -1,0 +1,17 @@
+[
+    {
+        "question": "What is machine learning?",
+        "expected_answer": "Machine learning is a branch of artificial intelligence that enables computers to learn from data.",
+        "expected_source": "machine_learning.pdf"
+    },
+    {
+        "question": "What are the types of machine learning?",
+        "expected_answer": "The main types of machine learning are supervised learning, unsupervised learning, and reinforcement learning.",
+        "expected_source": "machine_learning.pdf"
+    },
+    {
+        "question": "What is supervised learning?",
+        "expected_answer": "Supervised learning learns from labeled training data.",
+        "expected_source": "machine_learning.pdf"
+    }
+]
